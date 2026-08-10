@@ -75,36 +75,76 @@ const WEAPONS = [
     kind: 'orbit', count: 3, dps: 62, range: 0.4, spin: 0.85, orbit: 2.7,
     blurb: 'Trois satellites qui tirent tout seuls, même doigt levé.',
   },
+  {
+    // Un décalage de PI : le moteur de rayons suffit, l'arme tire à l'opposé.
+    id: 'rear', name: 'Revers', unlock: 4200, color: '#6d8bff',
+    kind: 'beam', beams: [Math.PI], dps: 95, range: 0.8, pierce: true,
+    halfWidth: 4, slack: 6, slackPerPx: 0.028,
+    blurb: 'Un rayon dans le dos. Couvre ce que tu ne regardes pas.',
+  },
+  {
+    id: 'chain', name: 'Foudre', unlock: 7000, color: '#e8ff5a',
+    kind: 'chain', interval: 0.55, damage: 46, range: 0.34, hops: 4, hopRange: 150,
+    blurb: 'Un arc qui saute d\'un ennemi à l\'autre, tout seul.',
+  },
 ];
 
 /*
  * Bonus lâchés par les ennemis. On les ramasse en passant un rayon dessus.
- * `duration` à 0 = effet immédiat.
+ *
+ *  - `duration` > 0 : effet temporaire, décompté en haut à gauche
+ *  - `duration` 0   : effet immédiat
+ *  - `permanent`    : améliore la partie jusqu'à sa fin, et se cumule
+ *
+ * `weight` pondère le tirage : les améliorations permanentes sont rares.
  */
 const BONUSES = {
   beams: {
-    name: 'Faisceaux', color: '#7cf7ff', duration: 12,
+    name: 'Faisceaux', color: '#7cf7ff', duration: 12, weight: 10,
     blurb: 'Deux rayons de plus sur chaque arme',
   },
   power: {
-    name: 'Surcharge', color: '#ff9f1c', duration: 10,
+    name: 'Surcharge', color: '#ff9f1c', duration: 10, weight: 10,
     blurb: 'Dégâts doublés',
   },
   slow: {
-    name: 'Ralenti', color: '#9fd8ff', duration: 8,
+    name: 'Ralenti', color: '#9fd8ff', duration: 8, weight: 9,
     blurb: 'Ennemis au ralenti',
   },
   arsenal: {
-    name: 'Arsenal', color: '#ffffff', duration: 10,
+    name: 'Arsenal', color: '#ffffff', duration: 10, weight: 7,
     blurb: 'Toutes les armes, même verrouillées',
   },
   repair: {
-    name: 'Réparation', color: '#5dffa0', duration: 0,
+    name: 'Réparation', color: '#5dffa0', duration: 0, weight: 9,
     blurb: 'Noyau réparé',
+  },
+
+  /* Améliorations définitives : elles tiennent jusqu'à la fin de la partie. */
+  hpUp: {
+    name: 'Blindage', color: '#5dffa0', duration: 0, weight: 4,
+    permanent: true, short: 'BLINDAGE',
+    blurb: '+30 PV maximum, définitif',
+  },
+  dpsUp: {
+    name: 'Amplificateur', color: '#ff5ec4', duration: 0, weight: 5,
+    permanent: true, short: 'AMPLI',
+    blurb: '+18 % de dégâts, définitif et cumulable',
+  },
+  orbitUp: {
+    name: 'Satellite', color: '#c9a3ff', duration: 0, weight: 4,
+    permanent: true, short: 'SATELLITE', max: 3,
+    blurb: 'Un orbiteur de plus, définitif',
+  },
+  magnet: {
+    name: 'Aimant', color: '#7cf7ff', duration: 0, weight: 3,
+    permanent: true, short: 'AIMANT', max: 1,
+    blurb: 'Les bonus viennent à toi, définitif',
   },
 };
 
 const BONUS_IDS = Object.keys(BONUSES);
+const BONUS_WEIGHT = BONUS_IDS.reduce((sum, id) => sum + BONUSES[id].weight, 0);
 
 /*
  * Paliers de série. Ils donnent son nom et sa couleur au moment, et cette
@@ -128,13 +168,20 @@ function comboTier(mult) {
 }
 
 const DROP = {
-  chance: 0.05,        // probabilité de lâcher un bonus, par ennemi tué
-  tankChance: 0.16,    // les gros sont plus généreux
+  chance: 0.06,        // probabilité de lâcher un bonus, par ennemi tué
+  tankChance: 0.18,    // les gros sont plus généreux
   life: 9,             // secondes avant disparition
   radius: 13,
   grabSlack: 12,       // marge de ramassage au-delà du rayon du bonus
   repairAmount: 35,
+  hpUpAmount: 30,
+  dpsUpStep: 0.18,
+  magnetPull: 520,     // accélération vers le noyau une fois l'Aimant pris
 };
+
+/* À partir de ce palier, chaque mort détone : les séries hautes se mettent
+   à réagir en chaîne, et l'écran part en morceaux. */
+const DETONATE = { fromTier: 6, damage: 26, radius: 58 };
 
 /* Types d'ennemis. `unlock` = secondes avant qu'il puisse apparaître. */
 const ENEMY_TYPES = {
@@ -193,8 +240,71 @@ const view = {
   safe: { top: 0, right: 0, bottom: 0, left: 0 },
 };
 
+/*
+ * Résolution adaptative. Le jeu est limité par le remplissage de pixels, pas
+ * par le calcul : un profil du pire cas passe 89 % du temps en rastérisation.
+ * Plutôt que de rogner les effets pour tout le monde, on baisse discrètement
+ * la résolution de rendu quand la cadence flanche, et on la remonte dès
+ * qu'elle revient. Le canvas garde sa taille CSS : c'est l'affichage qui
+ * ré-étire.
+ */
+/*
+ * Deux fausses pistes avant d'arriver ici, et elles méritent d'être notées.
+ *
+ * Chronométrer update+render ne sert à rien : les appels de dessin partent en
+ * file d'attente et sont payés par le compositeur, si bien que le pire cas ne
+ * mesure que 2 ms côté JavaScript.
+ *
+ * Comparer la durée d'image à un seuil ne sert pas davantage : avec la synchro
+ * verticale elle vaut 16,7 ms dès qu'on tient les 60 fps, marge confortable ou
+ * pas. La résolution descendait au moindre à-coup et ne remontait jamais.
+ *
+ * Ce qui marche : compter la proportion d'images longues sur une fenêtre. Une
+ * cadence saine n'en produit presque aucune, une cadence en souffrance en
+ * produit beaucoup — et le signal reste lisible dans les deux sens.
+ */
+const perf = {
+  quality: 1,     // multiplicateur de résolution, 0.6 à 1
+  long: 0,        // images dépassant le budget sur la fenêtre en cours
+  frames: 0,
+  timer: 0,
+  clean: 0,       // fenêtres consécutives sans souci
+};
+
+const PERF_WINDOW = 2;      // secondes par fenêtre d'observation
+const PERF_LONG = 0.021;    // au-delà, l'image a manqué son rendez-vous
+
+function updatePerf(dt) {
+  perf.frames++;
+  if (dt >= PERF_LONG) perf.long++;
+  perf.timer += dt;
+  if (perf.timer < PERF_WINDOW) return;
+
+  const ratio = perf.long / Math.max(1, perf.frames);
+  perf.timer = 0;
+  perf.long = 0;
+  perf.frames = 0;
+
+  if (ratio > 0.2 && perf.quality > 0.6) {
+    perf.quality = Math.max(0.6, perf.quality - 0.2);
+    perf.clean = 0;
+    resize();
+  } else if (ratio < 0.03) {
+    perf.clean++;
+    // On ne remonte qu'après trois fenêtres propres d'affilée, pour ne pas
+    // faire l'ascenseur entre deux vagues.
+    if (perf.clean >= 3 && perf.quality < 1) {
+      perf.quality = Math.min(1, perf.quality + 0.2);
+      perf.clean = 0;
+      resize();
+    }
+  } else {
+    perf.clean = 0;
+  }
+}
+
 function resize() {
-  const dpr = clamp(window.devicePixelRatio || 1, 1, 2);
+  const dpr = clamp(window.devicePixelRatio || 1, 1, 2) * perf.quality;
   const w = window.innerWidth;
   const h = window.innerHeight;
 
@@ -272,7 +382,7 @@ function drawBlob(x, y, r, color, alpha) {
 
 /** Halo ponctuel qui enfle et s'éteint : mort, impact, ramassage. */
 function addFlash(x, y, r, color, life) {
-  if (game.flashes.length >= 70) return;
+  if (game.flashes.length >= 26) return;
   game.flashes.push({ x, y, r, color, life, maxLife: life });
 }
 
@@ -369,12 +479,14 @@ function drawBackground(dt) {
   const { w, h, cx, cy } = view;
   const heat = game.intensity;
 
-  ctx.fillStyle = '#05060c';
-  ctx.fillRect(0, 0, w, h);
-
   const g = bgCtx;
   const k = BG_SCALE;
-  g.clearRect(0, 0, bgLayer.width, bgLayer.height);
+
+  // Le noir de fond est peint dans le calque, pas sur le canvas principal :
+  // une passe plein écran de moins par image.
+  g.globalCompositeOperation = 'source-over';
+  g.fillStyle = '#05060c';
+  g.fillRect(0, 0, bgLayer.width, bgLayer.height);
   g.globalCompositeOperation = 'lighter';
 
   // Teinte de fond : bleu profond au repos, virant lentement au violet à
@@ -397,9 +509,8 @@ function drawBackground(dt) {
   }
   g.globalAlpha = 1;
 
-  ctx.globalCompositeOperation = 'lighter';
-  ctx.drawImage(bgLayer, 0, 0, w, h);
   ctx.globalCompositeOperation = 'source-over';
+  ctx.drawImage(bgLayer, 0, 0, w, h);
 
   drawGrid(heat);
 }
@@ -455,10 +566,17 @@ const game = {
   tierTo: '#4df3ff',
   tierBlend: 1,
   hp: CFG.core.hpMax,
+  hpMax: CFG.core.hpMax,   // le Blindage le fait monter en cours de partie
+  perks: {},               // améliorations définitives -> nombre de prises
   unlocked: [true],     // un booléen par arme ; les armes se cumulent
   buffs: {},            // id de bonus -> secondes restantes
   orbitAngle: 0,        // phase de rotation des satellites
   orbitShots: [],       // tirs des satellites, recalculés à chaque image
+  chainTimer: 0,        // compte à rebours du prochain arc de foudre
+  chainArcs: [],        // arcs en cours d'affichage
+  delayed: [],          // explosions secondaires programmées
+  screenFlash: 0,       // éclair plein écran, 0..1
+  screenFlashColor: '#ffffff',
   enemies: [],
   pickups: [],
   particles: [],
@@ -496,10 +614,16 @@ function resetGame() {
   game.tierFrom = game.tierTo = COMBO_TIERS[0].color;
   game.tierBlend = 1;
   game.hp = CFG.core.hpMax;
+  game.hpMax = CFG.core.hpMax;
+  game.perks = {};
   game.unlocked = WEAPONS.map((w) => w.unlock === 0);
   game.buffs = {};
   game.orbitAngle = 0;
   game.orbitShots.length = 0;
+  game.chainTimer = 0;
+  game.chainArcs.length = 0;
+  game.delayed.length = 0;
+  game.screenFlash = 0;
   game.enemies.length = 0;
   game.pickups.length = 0;
   game.particles.length = 0;
@@ -640,6 +764,7 @@ const audio = {
   on: loadSound(),
   lastHit: -1,      // horodatages pour brider les sons en rafale
   lastKill: -1,
+  lastBoom: -1,
 };
 
 function loadSound() {
@@ -722,6 +847,7 @@ const HUM = {
   ray:   { freq: 128, detune: 7,  type: 'sawtooth', cutoff: 900,  gain: 0.09 },
   fan:   { freq: 88,  detune: 13, type: 'square',   cutoff: 700,  gain: 0.08 },
   lance: { freq: 196, detune: 4,  type: 'sawtooth', cutoff: 1500, gain: 0.10 },
+  rear:  { freq: 146, detune: 10, type: 'sawtooth', cutoff: 1100, gain: 0.09 },
 };
 
 function humStart() {
@@ -806,6 +932,33 @@ function sfxBuffEnd() {
 
 function sfxComboBreak() {
   tone(300, 0.26, { to: 110, type: 'triangle', gain: 0.11 });
+}
+
+/** Foudre : un crépitement d'autant plus aigu qu'il y a de rebonds. */
+function sfxChain(hops) {
+  noiseBurst(0.12, { type: 'highpass', freq: 1800, freqTo: 5200, gain: 0.13, q: 0.7 });
+  tone(700 + hops * 130, 0.1, { to: 1500 + hops * 200, type: 'square', gain: 0.07 });
+}
+
+/** Détonation de zone, bridée : à ×10 il y en a des dizaines par seconde. */
+function sfxBoom() {
+  if (game.corePulse - audio.lastBoom < 0.07) return;
+  audio.lastBoom = game.corePulse;
+  noiseBurst(0.26, { type: 'lowpass', freq: 1100, freqTo: 90, gain: 0.2 });
+  tone(96, 0.24, { to: 40, type: 'sine', gain: 0.22 });
+}
+
+/** Réplique d'une grosse explosion : plus mat, plus lointain. */
+function sfxAftershock() {
+  noiseBurst(0.2, { type: 'lowpass', freq: 700, freqTo: 70, gain: 0.14 });
+}
+
+/** Acquisition définitive : un accord, pas un bip. */
+function sfxPerk() {
+  [523, 659, 784, 1047].forEach((f, i) => {
+    tone(f, 0.5, { type: 'triangle', gain: 0.13, delay: i * 0.045 });
+  });
+  noiseBurst(0.3, { type: 'highpass', freq: 2400, freqTo: 6000, gain: 0.08 });
 }
 
 function sfxCombo(mult) {
@@ -905,7 +1058,9 @@ function spawnEnemy() {
   });
 }
 
-function killEnemy(enemy, index) {
+function killEnemy(enemy) {
+  const index = game.enemies.indexOf(enemy);
+  if (index < 0) return;        // déjà retiré par une détonation voisine
   game.enemies.splice(index, 1);
   game.kills++;
   game.combo++;
@@ -937,11 +1092,59 @@ function killEnemy(enemy, index) {
   addFlash(enemy.x, enemy.y, size * (big ? 7 : 5), tier.color, 0.35);
   shockRingAt(enemy.x, enemy.y, enemy.def.color, size * (big ? 4.2 : 2.8), big ? 0.4 : 0.28);
 
-  if (big) game.shake = Math.max(game.shake, 6);
+  if (big) {
+    // Les gros s'effondrent en deux temps : implosion, puis répliques.
+    game.shake = Math.max(game.shake, 8);
+    implode(enemy.x, enemy.y, enemy.def.color, 14, size * 2.6);
+    screenFlash(tier.color, 0.1 + heat * 0.12);
+    for (let i = 1; i <= 2; i++) {
+      const ox = enemy.x + rand(-size, size);
+      const oy = enemy.y + rand(-size, size);
+      later(0.09 * i, () => {
+        shards(ox, oy, enemy.def.color, 8, 1.1);
+        addFlash(ox, oy, size * 3, '#ffffff', 0.18);
+        shockRingAt(ox, oy, tier.color, size * 2.4, 0.24);
+        sfxAftershock();
+      });
+    }
+  }
+
   sfxKill(enemy);
   maybeDropBonus(enemy);
+  if (game.multiplier >= DETONATE.fromTier) detonate(enemy, tier);
 
   if (game.multiplier > before) comboTierUp(before);
+}
+
+/**
+ * Au-delà du palier Furie, chaque mort souffle ses voisins. C'est ce qui fait
+ * partir les fins de série en réaction en chaîne.
+ */
+let detonateDepth = 0;
+
+function detonate(source, tier) {
+  // Une détonation qui tue en déclenche une autre : sans borne, une nuée
+  // dense ferait exploser la pile d'appels.
+  if (detonateDepth >= 3) return;
+  detonateDepth++;
+
+  const r = DETONATE.radius;
+  const damage = DETONATE.damage * damageMultiplier();
+
+  // Instantané des voisins avant de frapper : les kills en chaîne modifient
+  // game.enemies pendant qu'on le parcourrait.
+  const near = game.enemies.filter(
+    (e) => Math.hypot(e.x - source.x, e.y - source.y) <= r + e.radius);
+
+  for (const e of near) {
+    const dist = Math.hypot(e.x - source.x, e.y - source.y) || 1;
+    hitEnemy(e, damage, (e.x - source.x) / dist, (e.y - source.y) / dist);
+  }
+  const touched = near.length;
+
+  shockRingAt(source.x, source.y, tier.color, r, 0.3, 3);
+  if (touched) sfxBoom();
+  detonateDepth--;
 }
 
 /** Franchissement d'un palier : le décor entier change de couleur. */
@@ -954,6 +1157,7 @@ function comboTierUp(before) {
     game.tierBlend = 0;
     if (tier.name) {
       showBanner(tier.name, `Multiplicateur ×${game.multiplier}`, tier.color);
+      screenFlash(tier.color, 0.16 + game.intensity * 0.16);
       game.shake = Math.max(game.shake, 5);
       vibrate([12, 30, 12]);
     }
@@ -1031,6 +1235,47 @@ function embers(x, y, color, count) {
   }
 }
 
+/**
+ * Implosion : des éclats convergent vers le point de mort avant que tout
+ * parte. Le décalage d'un dixième de seconde suffit à faire « aspirer puis
+ * souffler » plutôt que simplement souffler.
+ */
+function implode(x, y, color, count, radius) {
+  for (let i = 0; i < count; i++) {
+    const a = Math.random() * TAU;
+    const d = radius * rand(0.7, 1.3);
+    const v = d / 0.16;
+    addParticle({
+      x: x + Math.cos(a) * d, y: y + Math.sin(a) * d,
+      vx: -Math.cos(a) * v, vy: -Math.sin(a) * v,
+      life: 0.16, maxLife: 0.16,
+      size: rand(1.2, 2.6), drag: 1, shape: 'streak', color,
+    });
+  }
+}
+
+/** Programme un effet dans `delay` secondes (explosions secondaires). */
+function later(delay, fn) {
+  if (game.delayed.length >= 40) return;
+  game.delayed.push({ t: delay, fn });
+}
+
+function updateDelayed(dt) {
+  for (let i = game.delayed.length - 1; i >= 0; i--) {
+    const d = game.delayed[i];
+    d.t -= dt;
+    if (d.t > 0) continue;
+    game.delayed.splice(i, 1);
+    d.fn();
+  }
+}
+
+/** Éclair plein écran : réservé aux gros moments, sinon il perd son effet. */
+function screenFlash(color, strength) {
+  game.screenFlash = Math.max(game.screenFlash, strength);
+  game.screenFlashColor = color;
+}
+
 /** Anneau de choc. Tous les événements marquants en émettent un. */
 function shockRing(color, max, life, width) {
   if (game.rings.length >= CFG.ringsMax) return;
@@ -1097,6 +1342,10 @@ function update(dt) {
     updateCombo(dt);
     checkUnlocks();
   }
+
+  updateChainArcs(dt);
+  updateDelayed(dt);
+  game.screenFlash = Math.max(0, game.screenFlash - dt * 3.2);
 
   updateParticles(dt);
   updateRings(dt);
@@ -1200,6 +1449,7 @@ function endGame() {
   shockRing('#ffffff', view.spawnRadius * 0.9, 0.7, 6);
   shockRing('#ff3d81', view.spawnRadius * 0.65, 0.9, 3);
 
+  screenFlash('#ff3d81', 0.55);
   vibrate([40, 60, 120]);
   sfxGameOver();
 
@@ -1229,7 +1479,12 @@ function beamOffsets(w) {
 }
 
 function damageMultiplier() {
-  return game.buffs.power > 0 ? 2 : 1;
+  const amp = 1 + (game.perks.dpsUp || 0) * DROP.dpsUpStep;
+  return (game.buffs.power > 0 ? 2 : 1) * amp;
+}
+
+function orbiterCount(w) {
+  return w.count + (game.perks.orbitUp || 0);
 }
 
 /** Toutes les armes en service tirent ensemble. */
@@ -1240,9 +1495,64 @@ function fireAll(dt) {
     if (!isArmed(i)) continue;
     const w = WEAPONS[i];
 
-    // Les satellites se battent seuls ; les rayons attendent le doigt.
+    // Satellites et foudre se battent seuls ; les rayons attendent le doigt.
     if (w.kind === 'orbit') fireOrbiters(w, dt);
+    else if (w.kind === 'chain') fireChain(w, dt);
     else if (input.active && input.hasAngle) fireBeams(w, dt);
+  }
+}
+
+/**
+ * La Foudre part du noyau vers l'ennemi le plus proche, puis rebondit de
+ * voisin en voisin. Elle frappe par à-coups, pas en continu : c'est ce qui
+ * la rend lisible au milieu des rayons.
+ */
+function fireChain(w, dt) {
+  game.chainTimer -= dt;
+  if (game.chainTimer > 0) return;
+  game.chainTimer += w.interval;
+
+  const damage = w.damage * damageMultiplier();
+  const hit = new Set();   // objets déjà touchés par cet arc
+  const points = [{ x: view.cx, y: view.cy }];
+
+  let fromX = view.cx;
+  let fromY = view.cy;
+  let reach = view.spawnRadius * w.range;
+
+  for (let hop = 0; hop < w.hops; hop++) {
+    let target = null;
+    let best = reach;
+
+    for (const e of game.enemies) {
+      if (hit.has(e)) continue;
+      const d = Math.hypot(e.x - fromX, e.y - fromY);
+      if (d < best) { best = d; target = e; }
+    }
+    if (!target) break;
+
+    const e = target;
+    hit.add(e);
+    points.push({ x: e.x, y: e.y });
+    fromX = e.x;
+    fromY = e.y;
+    reach = w.hopRange;      // les rebonds suivants sont plus courts
+
+    addFlash(e.x, e.y, e.radius * 2.6, w.color, 0.18);
+  }
+
+  if (points.length < 2) return;
+
+  game.chainArcs.push({ points, life: 0.16, maxLife: 0.16, color: w.color });
+  sfxChain(points.length - 1);
+
+  for (const e of hit) hitEnemy(e, damage, 0, -1);
+}
+
+function updateChainArcs(dt) {
+  for (let i = game.chainArcs.length - 1; i >= 0; i--) {
+    game.chainArcs[i].life -= dt;
+    if (game.chainArcs[i].life <= 0) game.chainArcs.splice(i, 1);
   }
 }
 
@@ -1261,7 +1571,7 @@ function fireBeams(w, dt) {
     const ux = Math.cos(angle);
     const uy = Math.sin(angle);
 
-    let nearest = -1;         // seulement utile aux armes sans perçage
+    let nearest = null;       // seulement utile aux armes sans perçage
     let nearestAlong = Infinity;
 
     for (let i = game.enemies.length - 1; i >= 0; i--) {
@@ -1276,14 +1586,14 @@ function fireBeams(w, dt) {
       if (perp > e.radius + w.halfWidth + w.slack + along * w.slackPerPx) continue;
 
       if (w.pierce) {
-        hitEnemy(e, i, damage, ux, uy);
+        hitEnemy(e, damage, ux, uy);
       } else if (along < nearestAlong) {
         nearestAlong = along;
-        nearest = i;
+        nearest = e;
       }
     }
 
-    if (nearest >= 0) hitEnemy(game.enemies[nearest], nearest, damage, ux, uy);
+    if (nearest) hitEnemy(nearest, damage, ux, uy);
   }
 }
 
@@ -1297,36 +1607,43 @@ function fireOrbiters(w, dt) {
   const damage = w.dps * dt * damageMultiplier();
   const orbitR = view.coreRadius * w.orbit;
 
-  for (let s = 0; s < w.count; s++) {
-    const a = game.orbitAngle + (s / w.count) * TAU;
+  const count = orbiterCount(w);
+  for (let s = 0; s < count; s++) {
+    const a = game.orbitAngle + (s / count) * TAU;
     const sx = view.cx + Math.cos(a) * orbitR;
     const sy = view.cy + Math.sin(a) * orbitR;
 
-    let target = -1;
+    let target = null;
     let bestDist = reach;
-    for (let i = 0; i < game.enemies.length; i++) {
-      const e = game.enemies[i];
+    for (const e of game.enemies) {
       const d = Math.hypot(e.x - sx, e.y - sy);
-      if (d < bestDist) { bestDist = d; target = i; }
+      if (d < bestDist) { bestDist = d; target = e; }
     }
-    if (target < 0) continue;
+    if (!target) continue;
 
-    const e = game.enemies[target];
+    const e = target;
     game.orbitShots.push({ x1: sx, y1: sy, x2: e.x, y2: e.y, color: w.color });
 
     const ux = (e.x - sx) / (bestDist || 1);
     const uy = (e.y - sy) / (bestDist || 1);
-    hitEnemy(e, target, damage, ux, uy);
+    hitEnemy(e, damage, ux, uy);
   }
 }
 
-/** Applique des dégâts à un ennemi ; `ux/uy` oriente les étincelles d'impact. */
-function hitEnemy(enemy, index, damage, ux, uy) {
+/**
+ * Applique des dégâts à un ennemi ; `ux/uy` oriente les étincelles d'impact.
+ *
+ * On travaille sur l'objet, jamais sur un index : une détonation en chaîne
+ * retire des ennemis au milieu du tableau, et tout index capturé avant
+ * devient faux — c'est ce qui faisait planter la boucle.
+ */
+function hitEnemy(enemy, damage, ux, uy) {
+  if (enemy.hp <= 0) return;   // déjà abattu dans la même image
   enemy.hp -= damage;
   enemy.flash = 1;
 
   if (enemy.hp <= 0) {
-    killEnemy(enemy, index);
+    killEnemy(enemy);
     return;
   }
 
@@ -1354,13 +1671,27 @@ function hitEnemy(enemy, index, damage, ux, uy) {
  *  Bonus
  * ------------------------------------------------------------------ */
 
+/** Tirage pondéré : les améliorations définitives sont volontairement rares. */
+function pickBonusId() {
+  let r = Math.random() * BONUS_WEIGHT;
+  for (const id of BONUS_IDS) {
+    r -= BONUSES[id].weight;
+    if (r <= 0) return id;
+  }
+  return BONUS_IDS[0];
+}
+
 function maybeDropBonus(enemy) {
   const chance = enemy.def.hp > 60 ? DROP.tankChance : DROP.chance;
   if (Math.random() > chance) return;
 
-  const id = BONUS_IDS[Math.floor(Math.random() * BONUS_IDS.length)];
+  const id = pickBonusId();
+  const def = BONUSES[id];
+
   // La Réparation ne tombe que si elle sert à quelque chose.
-  if (id === 'repair' && game.hp > CFG.core.hpMax * 0.85) return;
+  if (id === 'repair' && game.hp > game.hpMax * 0.85) return;
+  // Ni une amélioration déjà poussée à son maximum.
+  if (def.max && (game.perks[id] || 0) >= def.max) return;
 
   const a = Math.random() * TAU;
   game.pickups.push({
@@ -1376,10 +1707,19 @@ function updatePickups(dt) {
     p.life -= dt;
     if (p.life <= 0) { game.pickups.splice(i, 1); continue; }
 
+    // L'Aimant tire les bonus vers le noyau, où ils sont happés d'office.
+    if (game.perks.magnet) {
+      const dx = view.cx - p.x;
+      const dy = view.cy - p.y;
+      const d = Math.hypot(dx, dy) || 1;
+      p.vx += (dx / d) * DROP.magnetPull * dt;
+      p.vy += (dy / d) * DROP.magnetPull * dt;
+    }
+
     p.x += p.vx * dt;
     p.y += p.vy * dt;
-    p.vx *= 0.965;
-    p.vy *= 0.965;
+    p.vx *= game.perks.magnet ? 0.99 : 0.965;
+    p.vy *= game.perks.magnet ? 0.99 : 0.965;
     p.spin += dt * 1.7;
 
     // Ramassage : un rayon qui passe dessus, ou le noyau qu'il effleure.
@@ -1417,13 +1757,20 @@ function beamTouches(x, y, slack) {
 }
 
 function collectBonus(pickup) {
-  const def = BONUSES[pickup.id];
+  const id = pickup.id;
+  const def = BONUSES[id];
 
-  if (pickup.id === 'repair') {
-    game.hp = Math.min(CFG.core.hpMax, game.hp + DROP.repairAmount);
+  if (def.permanent) {
+    game.perks[id] = (game.perks[id] || 0) + 1;
+    if (id === 'hpUp') {
+      game.hpMax += DROP.hpUpAmount;
+      game.hp += DROP.hpUpAmount;   // le blindage arrive déjà rempli
+    }
+  } else if (id === 'repair') {
+    game.hp = Math.min(game.hpMax, game.hp + DROP.repairAmount);
   } else {
     // Ramasser deux fois le même bonus prolonge, sans cumuler l'effet.
-    game.buffs[pickup.id] = (game.buffs[pickup.id] || 0) + def.duration;
+    game.buffs[id] = (game.buffs[id] || 0) + def.duration;
   }
 
   shockRingAt(pickup.x, pickup.y, def.color, 90, 0.45, 3);
@@ -1432,7 +1779,15 @@ function collectBonus(pickup) {
   shards(pickup.x, pickup.y, '#ffffff', 10, 1);
   showBanner(def.name, def.blurb, def.color);
   vibrate([10, 25, 10]);
-  sfxPickup();
+
+  if (def.permanent) {
+    // Une acquisition définitive mérite plus qu'un ramassage ordinaire.
+    screenFlash(def.color, 0.22);
+    shockRing(def.color, view.spawnRadius * 0.6, 0.7, 3);
+    sfxPerk();
+  } else {
+    sfxPickup();
+  }
 }
 
 function updateCombo(dt) {
@@ -1465,17 +1820,26 @@ function checkUnlocks() {
  *  Rendu
  * ------------------------------------------------------------------ */
 
-/** Trait lumineux : trois passes additives, bien moins coûteux que shadowBlur. */
-function glowLine(x1, y1, x2, y2, color, width) {
+/**
+ * Trait lumineux : trois passes additives, bien moins coûteux que shadowBlur.
+ *
+ * `cheap` supprime la passe de halo la plus large. Avec toutes les armes et
+ * le bonus Faisceaux, treize rayons traversent l'écran en même temps : cette
+ * seule passe, large et pleine longueur, suffisait à faire tomber le pire cas
+ * sous les 30 images par seconde.
+ */
+function glowLine(x1, y1, x2, y2, color, width, cheap) {
   ctx.globalCompositeOperation = 'lighter';
   ctx.lineCap = 'round';
 
   ctx.strokeStyle = color;
-  ctx.globalAlpha = 0.16;
-  ctx.lineWidth = width * 4.5;
-  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  if (!cheap) {
+    ctx.globalAlpha = 0.16;
+    ctx.lineWidth = width * 4.5;
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  }
 
-  ctx.globalAlpha = 0.34;
+  ctx.globalAlpha = cheap ? 0.42 : 0.34;
   ctx.lineWidth = width * 2;
   ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
 
@@ -1523,6 +1887,7 @@ function render(dt) {
 
   drawHud();
   drawDangerVignette();
+  drawScreenFlash();
 }
 
 function drawStars() {
@@ -1553,6 +1918,14 @@ function drawWeapon() {
   const firing = input.active && input.hasAngle;
 
   if (firing) {
+    // Au-delà de sept rayons, on allège le halo : c'est invisible à l'œil
+    // dans cette densité, et c'est ce qui tient la cadence.
+    let count = 0;
+    for (let i = 0; i < WEAPONS.length; i++) {
+      if (isArmed(i) && WEAPONS[i].kind === 'beam') count += beamOffsets(WEAPONS[i]).length;
+    }
+    const cheap = count > 7;
+
     for (let i = 0; i < WEAPONS.length; i++) {
       if (!isArmed(i)) continue;
       const w = WEAPONS[i];
@@ -1566,7 +1939,7 @@ function drawWeapon() {
         glowLine(
           cx + ux * (view.coreRadius - 2), cy + uy * (view.coreRadius - 2),
           cx + ux * reach, cy + uy * reach,
-          w.color, w.halfWidth * flicker
+          w.color, w.halfWidth * flicker, cheap
         );
       }
     }
@@ -1590,6 +1963,67 @@ function drawWeapon() {
   }
 
   drawOrbiters();
+  drawChainArcs();
+}
+
+/**
+ * Les arcs de foudre : chaque segment est brisé en zigzag, avec un
+ * déplacement latéral proportionnel à sa longueur.
+ */
+function drawChainArcs() {
+  if (!game.chainArcs.length) return;
+
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  for (const arc of game.chainArcs) {
+    const fade = arc.life / arc.maxLife;
+
+    ctx.beginPath();
+    ctx.moveTo(arc.points[0].x, arc.points[0].y);
+    for (let i = 1; i < arc.points.length; i++) {
+      const a = arc.points[i - 1];
+      const b = arc.points[i];
+      const len = Math.hypot(b.x - a.x, b.y - a.y);
+      const steps = Math.max(2, Math.round(len / 26));
+      const nx = -(b.y - a.y) / (len || 1);
+      const ny = (b.x - a.x) / (len || 1);
+
+      for (let k = 1; k <= steps; k++) {
+        const t = k / steps;
+        const jitter = k === steps ? 0 : rand(-1, 1) * len * 0.09;
+        ctx.lineTo(a.x + (b.x - a.x) * t + nx * jitter,
+                   a.y + (b.y - a.y) * t + ny * jitter);
+      }
+    }
+
+    ctx.strokeStyle = hexToRgba(arc.color, 0.3 * fade);
+    ctx.lineWidth = 9;
+    ctx.stroke();
+    ctx.strokeStyle = hexToRgba(arc.color, 0.8 * fade);
+    ctx.lineWidth = 3.5;
+    ctx.stroke();
+    ctx.strokeStyle = `rgba(255,255,255,${fade})`;
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+  }
+
+  ctx.lineCap = 'butt';
+  ctx.lineJoin = 'miter';
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+/** Éclair plein écran, en dernier : il doit passer par-dessus tout. */
+function drawScreenFlash() {
+  if (game.screenFlash <= 0.03) return;
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = game.screenFlash;
+  ctx.fillStyle = game.screenFlashColor;
+  ctx.fillRect(0, 0, view.w, view.h);
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
 }
 
 function drawOrbiters() {
@@ -1605,8 +2039,9 @@ function drawOrbiters() {
   }
 
   ctx.globalCompositeOperation = 'lighter';
-  for (let s = 0; s < w.count; s++) {
-    const a = game.orbitAngle + (s / w.count) * TAU;
+  const count = orbiterCount(w);
+  for (let s = 0; s < count; s++) {
+    const a = game.orbitAngle + (s / count) * TAU;
     const x = view.cx + Math.cos(a) * orbitR;
     const y = view.cy + Math.sin(a) * orbitR;
     const r = 5.5 * view.scale;
@@ -1760,7 +2195,7 @@ function drawCore() {
   const { cx, cy } = view;
   const R = view.coreRadius;
   const pulse = 1 + Math.sin(game.corePulse * 2.2) * 0.03;
-  const hpFrac = game.hp / CFG.core.hpMax;
+  const hpFrac = game.hp / game.hpMax;
 
   // Aura, teintée par le palier de série et gonflée par l'intensité.
   ctx.globalCompositeOperation = 'lighter';
@@ -1824,11 +2259,14 @@ function drawThreatRing() {
   ctx.globalCompositeOperation = 'lighter';
   ctx.lineCap = 'round';
 
+  let drawn = 0;
   for (const e of game.enemies) {
+    if (drawn >= 30) break;      // au-delà, l'anneau devient illisible
     const dx = e.x - cx;
     const dy = e.y - cy;
     const dist = Math.hypot(dx, dy);
     if (dist > range) continue;
+    drawn++;
 
     // 0 au bord de la zone de veille, 1 au contact.
     const near = clamp(1 - (dist - view.coreRadius) / (range - view.coreRadius), 0, 1);
@@ -1927,8 +2365,9 @@ function drawHud() {
   ctx.font = `700 ${Math.round(28 * s)}px ui-sans-serif, system-ui, sans-serif`;
   ctx.fillText(String(game.score), padX, padY);
 
-  const comboRows = drawCombo(padX, padY + Math.round(32 * s), s);
-  drawBuffChips(padX, padY + Math.round((32 + comboRows) * s), s);
+  let cursor = 32 + drawCombo(padX, padY + Math.round(32 * s), s);
+  cursor += drawPerkChips(padX, padY + Math.round(cursor * s), s);
+  drawBuffChips(padX, padY + Math.round(cursor * s), s);
 
   // Chrono, centré : le coin droit appartient au coupe-son.
   ctx.textAlign = 'center';
@@ -1982,6 +2421,43 @@ function drawCombo(x, y, s) {
   return 34;
 }
 
+/**
+ * Améliorations définitives : pas de barre, elles ne s'épuisent pas. Juste
+ * leur nom et, si elles se cumulent, le nombre de prises.
+ */
+function drawPerkChips(x, y, s) {
+  const ids = Object.keys(game.perks);
+  if (!ids.length) return 0;
+
+  const h = Math.round(13 * s);
+  const gap = Math.round(4 * s);
+  let col = x;
+
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.font = `700 ${Math.round(8.5 * s)}px ui-sans-serif, system-ui, sans-serif`;
+
+  for (const id of ids) {
+    const def = BONUSES[id];
+    const n = game.perks[id];
+    const label = n > 1 ? `${def.short} ×${n}` : def.short;
+    const w = ctx.measureText(label).width + 13 * s;
+
+    ctx.fillStyle = hexToRgba(def.color, 0.18);
+    ctx.fillRect(col, y, w, h);
+    ctx.fillStyle = def.color;
+    ctx.fillRect(col, y, 2, h);
+    ctx.globalAlpha = 0.9;
+    ctx.fillText(label, col + 6 * s, y + h / 2 + 0.5);
+    ctx.globalAlpha = 1;
+
+    col += w + gap;
+  }
+
+  ctx.textBaseline = 'top';
+  return 13 + 5;
+}
+
 /** Effets en cours, avec leur temps restant sous forme de barre qui fond. */
 function drawBuffChips(x, y, s) {
   const h = Math.round(15 * s);
@@ -2022,7 +2498,7 @@ function formatTime(t) {
 /** Halo rouge en bord d'écran quand le noyau est en danger. */
 function drawDangerVignette() {
   if (game.state !== STATE.PLAYING) return;
-  const hpFrac = game.hp / CFG.core.hpMax;
+  const hpFrac = game.hp / game.hpMax;
   if (hpFrac > 0.34) return;
 
   const intensity = (0.34 - hpFrac) / 0.34;
@@ -2044,6 +2520,8 @@ const WEAPON_GLYPHS = {
   ray: '<path d="M11 20V4"/>',
   fan: '<path d="M4.5 20 8.5 6"/><path d="M17.5 20 13.5 6"/>',
   lance: '<path d="M11 20V9"/><path d="M11 2 7.5 9h7z" fill="currentColor" stroke="none"/>',
+  rear: '<path d="M11 2v8"/><path d="M11 20l3.5-7h-7z" fill="currentColor" stroke="none"/>',
+  chain: '<path d="M12.5 2 6 11.5h4L8.5 20 16 9.5h-4.5z" fill="currentColor" stroke="none"/>',
   orbit: '<circle cx="11" cy="11" r="3" fill="currentColor" stroke="none"/>'
        + '<ellipse cx="11" cy="11" rx="9" ry="4.2"/>'
        + '<circle cx="20" cy="11" r="1.7" fill="currentColor" stroke="none"/>'
@@ -2051,7 +2529,7 @@ const WEAPON_GLYPHS = {
 };
 
 function weaponGlyph(id) {
-  return `<svg class="glyph" width="22" height="22" viewBox="0 0 22 22" aria-hidden="true"
+  return `<svg class="glyph" width="19" height="19" viewBox="0 0 22 22" aria-hidden="true"
     fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
     ${WEAPON_GLYPHS[id]}</svg>`;
 }
@@ -2140,6 +2618,7 @@ function announceUnlock(w) {
   showBanner(`${w.name} débloqué`, w.blurb, w.color);
   shockRing(w.color, view.spawnRadius * 0.55, 0.8, 3);
   addFlash(view.cx, view.cy, view.coreRadius * 7, w.color, 0.6);
+  screenFlash(w.color, 0.3);
   burst(view.cx, view.cy, w.color, 40, 1.6);
   vibrate([15, 40, 15]);
   sfxUnlock();
@@ -2247,10 +2726,18 @@ function frame(now) {
   const dt = lastTime ? Math.min((now - lastTime) / 1000, 0.05) : 0;
   lastTime = now;
 
-  update(dt);
-  render(dt);
-
-  requestAnimationFrame(frame);
+  // Une exception dans une image ne doit pas figer la partie pour de bon :
+  // sans ce `finally`, la boucle ne se réarmait jamais et l'écran restait
+  // gelé sur la dernière image rendue.
+  try {
+    update(dt);
+    render(dt);
+  } catch (err) {
+    console.error('image ignorée :', err);
+  } finally {
+    if (dt > 0) updatePerf(dt);
+    requestAnimationFrame(frame);
+  }
 }
 
 window.addEventListener('resize', resize);
@@ -2262,4 +2749,4 @@ showMenu();
 requestAnimationFrame(frame);
 
 /* Poignée de débogage : permet d'inspecter l'état depuis la console. */
-window.VIRGULE = { game, view, input, audio, CFG, ENEMY_TYPES, WEAPONS, BONUSES, COMBO_TIERS };
+window.VIRGULE = { game, view, input, audio, perf, CFG, ENEMY_TYPES, WEAPONS, BONUSES, COMBO_TIERS };

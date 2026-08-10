@@ -88,17 +88,30 @@ tire s'allume, le reste indique le score à atteindre.
 | Éventail | 350 | Deux rayons de flanc. Élargit la coupe, ne porte pas loin. |
 | Lance | 950 | Concentre le tir sur la cible la plus proche. Perce les blindés. |
 | Orbiteurs | 2 100 | Trois satellites qui visent et tirent seuls, même doigt levé. |
+| Revers | 4 200 | Un rayon dans le dos. Couvre ce que tu ne regardes pas. |
+| Foudre | 7 000 | Un arc qui saute jusqu'à quatre ennemis, tout seul. |
 
-Les paliers sont réglés pour qu'un joueur correct les franchisse vers 25 s,
-40 s et 60 s. Cumulées, les quatre armes quadruplent environ les dégâts du
-Rayon seul — c'est pourquoi les ennemis gagnent des points de vie avec le
-temps (+100 % en 260 s), pour que la fin de partie garde du mordant.
+Un joueur correct franchit les trois premiers paliers vers 25 s, 40 s et 55 s,
+le Revers vers 90 s ; la Foudre est un objectif de fin de partie. Cumulées,
+les armes multiplient largement les dégâts du Rayon seul — c'est pourquoi les
+ennemis gagnent des points de vie avec le temps (+100 % en 260 s).
+
+## Détonations en chaîne
+
+À partir du palier **Furie** (×6), chaque mort souffle ses voisins dans un
+rayon de 58 px. Une nuée dense part alors en réaction en chaîne, ce qui rend
+les hauts multiplicateurs spectaculaires — et instables, puisqu'il suffit
+d'une seconde sans kill pour tout perdre. La récursion est bornée à trois
+niveaux : sans cela une nuée dense faisait déborder la pile d'appels.
 
 ## Bonus
 
-Les ennemis lâchent parfois un bonus (5 % du temps, 16 % pour les tanks). On le
+Les ennemis lâchent parfois un bonus (6 % du temps, 18 % pour les tanks). On le
 ramasse **en passant un rayon dessus** ; il disparaît au bout de 9 secondes et
-clignote sur la fin.
+clignote sur la fin. Le tirage est pondéré : les améliorations définitives sont
+nettement plus rares que les effets temporaires.
+
+**Temporaires** — décomptés en haut à gauche par une barre qui se vide.
 
 | Bonus | Durée | Effet |
 | --- | --- | --- |
@@ -108,9 +121,18 @@ clignote sur la fin.
 | Arsenal | 10 s | Toutes les armes tirent, même celles encore verrouillées |
 | Réparation | — | +35 PV au noyau, immédiat |
 
-Les effets en cours s'affichent en haut à gauche avec une barre qui se vide.
-Reprendre un bonus déjà actif prolonge sa durée au lieu d'empiler l'effet, et
-la Réparation ne tombe jamais quand le noyau est déjà presque intact.
+**Définitifs** — acquis jusqu'à la fin de la partie, affichés sans barre.
+
+| Amélioration | Effet | Plafond |
+| --- | --- | --- |
+| Blindage | +30 PV maximum, et le noyau les reçoit pleins | — |
+| Amplificateur | +18 % de dégâts, cumulable | — |
+| Satellite | Un orbiteur de plus | 3 |
+| Aimant | Les bonus sont attirés par le noyau | 1 |
+
+Reprendre un bonus temporaire déjà actif prolonge sa durée au lieu d'empiler
+l'effet. La Réparation ne tombe jamais quand le noyau est presque intact, ni
+une amélioration déjà à son plafond.
 
 ## Ennemis
 
@@ -148,9 +170,13 @@ du navigateur.
 ## Son
 
 Tout est synthétisé à la volée en WebAudio — oscillateurs et bruit blanc
-filtré — donc aucun fichier à télécharger. Chaque arme a son bourdonnement de
-tir ; les impacts, les explosions, les paliers de combo et les déblocages ont
-leur signature. Les rafales sont bridées pour ne pas saturer la sortie.
+filtré — donc aucun fichier à télécharger. Chaque arme à rayon a son
+bourdonnement de tir ; les impacts, les explosions graduées selon la taille,
+les répliques des grosses morts, les détonations de zone, le crépitement de la
+Foudre (d'autant plus aigu qu'il rebondit), les paliers de série, les
+ramassages, l'accord d'une acquisition définitive et l'effondrement final ont
+chacun leur signature. Les rafales sont bridées pour ne pas saturer la sortie :
+à ×10 il peut y avoir des dizaines de détonations par seconde.
 
 Le contexte audio ne peut naître que dans un geste utilisateur (iOS l'exige),
 il s'ouvre donc au premier appui. Le bouton en haut à droite coupe le son ;
@@ -171,7 +197,27 @@ le choix est retenu en `localStorage`.
   remplissage d'un mobile au plein format. Comme il est entièrement flou, il
   est peint dans un calque au tiers de la résolution puis ré-étiré : neuf fois
   moins de pixels, aucune différence visible. Sans cette astuce, la charge
-  maximale tombait à 31 fps.
+  maximale tombait à 31 fps. Le noir de fond est peint dans ce calque plutôt
+  que sur le canvas, ce qui économise encore une passe plein écran.
+- **Résolution adaptative.** Un profil du pire cas passe 89 % du temps en
+  rastérisation : le jeu est limité par les pixels, pas par le calcul. Plutôt
+  que d'appauvrir les effets pour tout le monde, la résolution de rendu
+  descend par paliers jusqu'à 60 % quand la cadence flanche, et remonte après
+  trois fenêtres propres d'affilée. Le canvas garde sa taille CSS, l'affichage
+  ré-étire.
+
+  Deux métriques ont été essayées avant d'arriver là, et toutes deux échouent
+  pour des raisons instructives. Chronométrer `update` + `render` ne mesure
+  rien d'utile : les appels de dessin partent en file d'attente, si bien que
+  le pire cas ne coûte que 2 ms côté JavaScript. Comparer la durée d'image à
+  un seuil échoue autrement : avec la synchro verticale elle vaut 16,7 ms dès
+  qu'on tient les 60 fps, marge confortable ou non — la résolution descendait
+  au moindre à-coup sans jamais pouvoir remonter. Ce qui fonctionne est de
+  compter la **proportion d'images longues** sur une fenêtre de 2 s : le
+  signal reste lisible dans les deux sens.
+- La boucle principale réarme `requestAnimationFrame` dans un `finally`. Une
+  exception dans une image affiche une erreur mais ne fige plus la partie —
+  un bug réel l'a démontré pendant le développement.
 - La poussière de fond dérive vers le noyau avec un effet de parallaxe, se
   régénère au bord une fois absorbée, et accélère avec l'intensité.
 - Gestes natifs neutralisés : zoom au double-tap, scroll élastique, sélection,
