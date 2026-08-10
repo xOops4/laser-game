@@ -15,9 +15,14 @@
 const CFG = {
   core: {
     hpMax: 120,
-    radiusFactor: 0.075,   // fraction de la plus petite dimension de l'écran
-    radiusMin: 26,
-    radiusMax: 58,
+    radiusFactor: 0.058,   // fraction de la plus petite dimension de l'écran
+    radiusMin: 24,
+    radiusMax: 46,
+  },
+  aim: {
+    deadzone: 14,          // px avant que le manche virtuel prenne la main
+    stickRadius: 30,       // rayon dessiné du manche
+    threatRange: 0.62,     // les menaces s'affichent en deçà de cette fraction
   },
   combo: {
     killsPerStep: 8,       // kills nécessaires pour +1 au multiplicateur
@@ -67,7 +72,7 @@ const WEAPONS = [
   },
   {
     id: 'orbit', name: 'Orbiteurs', unlock: 2100, color: '#c9a3ff',
-    kind: 'orbit', count: 3, dps: 62, range: 0.4, spin: 0.85, orbit: 2.2,
+    kind: 'orbit', count: 3, dps: 62, range: 0.4, spin: 0.85, orbit: 2.7,
     blurb: 'Trois satellites qui tirent tout seuls, même doigt levé.',
   },
 ];
@@ -513,6 +518,29 @@ function resetGame() {
  *  Entrée tactile / souris
  * ------------------------------------------------------------------ */
 
+/*
+ * Deux façons de viser.
+ *
+ *  - 'direct' : l'angle va du noyau au doigt. Immédiat, mais le doigt se
+ *    place forcément dans la direction visée : il masque ce qu'on regarde.
+ *  - 'pouce'  : le doigt pose un manche virtuel là où il touche, et l'angle
+ *    va de ce point d'ancrage au doigt. On peut donc jouer pouce calé en bas
+ *    de l'écran tout en tirant vers le haut : plus rien ne masque l'action.
+ */
+const AIM_KEY = 'virgule.aim';
+
+function loadAim() {
+  try { return localStorage.getItem(AIM_KEY) === 'direct' ? 'direct' : 'pouce'; }
+  catch (_) { return 'pouce'; }
+}
+
+let aimMode = loadAim();
+
+function setAimMode(mode) {
+  aimMode = mode;
+  try { localStorage.setItem(AIM_KEY, mode); } catch (_) { /* tant pis */ }
+}
+
 /* Un seul doigt compte : le premier posé. Les suivants sont ignorés
    tant qu'il n'a pas été relevé. */
 const input = {
@@ -520,13 +548,23 @@ const input = {
   pointerId: null,
   angle: 0,        // direction visée, en radians
   hasAngle: false, // le canon garde sa dernière orientation même doigt levé
+  ox: 0, oy: 0,    // ancrage du manche virtuel
+  fx: 0, fy: 0,    // position courante du doigt
 };
 
 function updateAngleFrom(e) {
-  const dx = e.clientX - view.cx;
-  const dy = e.clientY - view.cy;
-  // Pile au centre : on garde l'angle précédent plutôt que de faire sauter le canon.
-  if (dx * dx + dy * dy < 1) return;
+  input.fx = e.clientX;
+  input.fy = e.clientY;
+
+  const ax = aimMode === 'pouce' ? input.ox : view.cx;
+  const ay = aimMode === 'pouce' ? input.oy : view.cy;
+  const dx = e.clientX - ax;
+  const dy = e.clientY - ay;
+
+  // Sous le seuil, on garde l'angle précédent : ni saut ni tremblement.
+  const min = aimMode === 'pouce' ? CFG.aim.deadzone : 1;
+  if (dx * dx + dy * dy < min * min) return;
+
   input.angle = Math.atan2(dy, dx);
   input.hasAngle = true;
 }
@@ -535,6 +573,9 @@ canvas.addEventListener('pointerdown', (e) => {
   if (input.pointerId !== null) return;
   input.pointerId = e.pointerId;
   input.active = true;
+  // Le manche s'ancre là où le doigt se pose, à chaque nouvel appui.
+  input.ox = e.clientX;
+  input.oy = e.clientY;
   updateAngleFrom(e);
   audioInit();          // premier geste utilisateur : iOS n'autorise que là
   audioResume();
@@ -1471,9 +1512,14 @@ function render(dt) {
   drawPickups();
   drawEnemies();
 
-  if (game.hp > 0) drawCore();
+  if (game.hp > 0) {
+    drawCore();
+    if (game.state === STATE.PLAYING || game.state === STATE.PAUSED) drawThreatRing();
+  }
 
   ctx.restore();
+
+  drawStick();
 
   drawHud();
   drawDangerVignette();
@@ -1761,6 +1807,85 @@ function drawCore() {
   ctx.lineCap = 'butt';
 }
 
+/*
+ * Anneau de menaces : un cran par ennemi, planté à l'angle d'où il vient,
+ * d'autant plus long et vif qu'il est proche. Le tout tient dans le disque
+ * autour du noyau — la seule zone qu'un doigt ne masque jamais — donc on
+ * garde une lecture complète de ce qui approche même écran partiellement
+ * caché.
+ */
+function drawThreatRing() {
+  if (!game.enemies.length) return;
+
+  const { cx, cy } = view;
+  const inner = view.coreRadius + 14;
+  const range = view.spawnRadius * CFG.aim.threatRange;
+
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.lineCap = 'round';
+
+  for (const e of game.enemies) {
+    const dx = e.x - cx;
+    const dy = e.y - cy;
+    const dist = Math.hypot(dx, dy);
+    if (dist > range) continue;
+
+    // 0 au bord de la zone de veille, 1 au contact.
+    const near = clamp(1 - (dist - view.coreRadius) / (range - view.coreRadius), 0, 1);
+    const a = Math.atan2(dy, dx);
+    const ux = Math.cos(a);
+    const uy = Math.sin(a);
+    const len = 4 + near * 9;
+
+    ctx.strokeStyle = hexToRgba(e.def.color, 0.25 + near * 0.65);
+    ctx.lineWidth = 2 + near * 1.6;
+    ctx.beginPath();
+    ctx.moveTo(cx + ux * inner, cy + uy * inner);
+    ctx.lineTo(cx + ux * (inner + len), cy + uy * (inner + len));
+    ctx.stroke();
+  }
+
+  ctx.lineCap = 'butt';
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+/** Manche virtuel : ancrage, direction poussée, et le doigt au bout. */
+function drawStick() {
+  if (aimMode !== 'pouce' || !input.active) return;
+
+  const R = CFG.aim.stickRadius;
+  const dx = input.fx - input.ox;
+  const dy = input.fy - input.oy;
+  const dist = Math.hypot(dx, dy);
+
+  ctx.globalCompositeOperation = 'lighter';
+
+  ctx.strokeStyle = 'rgba(232,246,255,0.22)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(input.ox, input.oy, R, 0, TAU);
+  ctx.stroke();
+
+  if (dist > CFG.aim.deadzone) {
+    const k = Math.min(1, R / dist);
+    const kx = input.ox + dx * k;
+    const ky = input.oy + dy * k;
+
+    ctx.strokeStyle = hexToRgba(game.tierTo, 0.5);
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(input.ox, input.oy);
+    ctx.lineTo(kx, ky);
+    ctx.stroke();
+
+    drawBlob(kx, ky, 14, game.tierTo, 0.5);
+  }
+
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+}
+
 function drawParticles() {
   ctx.globalCompositeOperation = 'lighter';
   ctx.lineCap = 'round';
@@ -1946,6 +2071,38 @@ function renderWeaponBar() {
   }).join('');
 }
 
+/* ------------------------------------------------------------------ *
+ *  Réglage de visée
+ * ------------------------------------------------------------------ */
+
+const AIM_OPTIONS = [
+  { id: 'pouce', name: 'Pouce', hint: 'Le doigt pose un manche et pousse dans la direction. Rien ne masque l\'écran.' },
+  { id: 'direct', name: 'Directe', hint: 'On vise l\'endroit qu\'on touche. Plus immédiat, mais le doigt gêne.' },
+];
+
+function aimSelectorHtml() {
+  const buttons = AIM_OPTIONS.map((o) => `
+    <button type="button" class="aim-opt" data-aim="${o.id}"
+      aria-pressed="${aimMode === o.id}">
+      <span>${o.name}</span><span class="hint-sm">${o.hint}</span>
+    </button>`).join('');
+  return `<div class="seg-label">Visée</div><div class="seg">${buttons}</div>`;
+}
+
+/** À rappeler après chaque écriture d'un panneau contenant le sélecteur. */
+function wireAimSelector() {
+  panel.querySelectorAll('.aim-opt').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      setAimMode(btn.dataset.aim);
+      panel.querySelectorAll('.aim-opt').forEach((b) => {
+        b.setAttribute('aria-pressed', String(b.dataset.aim === aimMode));
+      });
+      audioInit();
+      sfxSwitch();
+    });
+  });
+}
+
 function renderSoundButton() {
   const waves = audio.on
     ? '<path d="M11.5 7a4.5 4.5 0 0 1 0 6"/><path d="M14 4.5a8 8 0 0 1 0 11"/>'
@@ -2001,11 +2158,12 @@ function showMenu() {
     <div class="title">VIRGULE</div>
     <div class="subtitle">défends le noyau</div>
     <div class="hint">
-      Garde le doigt sur l'écran : le rayon suit ta position.<br>
+      Garde le doigt sur l'écran : le rayon suit ta direction.<br>
       <b>Balaie</b> pour découper tout ce qui approche.<br>
       Les points débloquent des <b>armes qui se cumulent</b>, et les ennemis
       lâchent des <b>bonus</b> à ramasser d'un coup de rayon.
     </div>
+    ${aimSelectorHtml()}
     ${game.best > 0 ? `
       <div class="scores">
         <div class="score-block best">
@@ -2015,6 +2173,7 @@ function showMenu() {
       </div>` : ''}
     <button type="button" id="btn-primary">Jouer</button>
   `;
+  wireAimSelector();
   document.getElementById('btn-primary').addEventListener('click', startGame);
 }
 
@@ -2025,8 +2184,10 @@ function showPause() {
   panel.innerHTML = `
     <div class="title">PAUSE</div>
     <div class="subtitle">partie en cours</div>
+    ${aimSelectorHtml()}
     <button type="button" id="btn-primary">Reprendre</button>
   `;
+  wireAimSelector();
   document.getElementById('btn-primary').addEventListener('click', () => {
     overlay.hidden = true;
     weaponBar.hidden = false;

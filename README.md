@@ -20,10 +20,30 @@ python3 -m http.server 8000
 Le jeu est entièrement statique : il peut être servi tel quel par n'importe
 quel hébergeur de fichiers.
 
+## Visée
+
+Deux modes, choisis depuis le menu ou l'écran de pause, retenus en
+`localStorage`.
+
+**Pouce** (par défaut). Le doigt pose un manche virtuel là où il touche, et
+l'angle de tir va de cet ancrage au doigt : on pousse dans la direction où l'on
+veut tirer. On peut donc jouer pouce calé en bas de l'écran et tirer vers le
+haut — la main ne masque plus jamais l'action. Le manche se réancre à chaque
+nouvel appui, donc aucune position n'est imposée.
+
+**Directe**. L'angle va du noyau au doigt : on vise l'endroit qu'on touche.
+Plus immédiat à comprendre, mais le doigt se place forcément dans la direction
+visée, c'est-à-dire pile devant ce qu'on essaie de regarder.
+
+Un **anneau de menaces** entoure le noyau : un cran par ennemi proche, planté à
+l'angle d'où il vient, d'autant plus long et vif qu'il approche. Il tient dans
+le disque central — la seule zone qu'une main ne masque jamais — et permet donc
+de lire ce qui arrive même écran partiellement caché.
+
 ## Comment ça se joue
 
-- **Garde le doigt posé** n'importe où sur l'écran : les armes tirent depuis le
-  noyau dans la direction de ton doigt. Nul besoin de partir du centre.
+- **Garde le doigt posé** sur l'écran : les armes tirent depuis le noyau dans
+  la direction que tu donnes.
 - **Balaie** pour découper. Le rayon traverse tout ce qui est aligné : bien
   s'aligner sur plusieurs ennemis d'un coup, c'est là que les points se font.
 - Les dégâts sont **par seconde** : il faut rester une fraction de seconde sur
