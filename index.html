@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#05060c">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>VIRGULE</title>
+<style>
+  :root {
+    --neon: #4df3ff;
+    --hot: #ff3d81;
+    --bg: #05060c;
+    --safe-t: env(safe-area-inset-top, 0px);
+    --safe-b: env(safe-area-inset-bottom, 0px);
+    --safe-l: env(safe-area-inset-left, 0px);
+    --safe-r: env(safe-area-inset-right, 0px);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    color: #e8f6ff;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    /* Coupe tous les gestes natifs : zoom double-tap, scroll élastique, sélection. */
+    touch-action: none;
+    overscroll-behavior: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
+  }
+
+  #game {
+    display: block;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+  }
+
+  /* Sonde lue par le JS pour connaître les encoches en pixels CSS. */
+  #safe-probe {
+    position: fixed;
+    top: 0; left: 0;
+    width: 0; height: 0;
+    padding: var(--safe-t) var(--safe-r) var(--safe-b) var(--safe-l);
+    pointer-events: none;
+    visibility: hidden;
+  }
+
+  #overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: calc(var(--safe-t) + 20px) calc(var(--safe-r) + 20px)
+             calc(var(--safe-b) + 20px) calc(var(--safe-l) + 20px);
+    background: radial-gradient(circle at 50% 45%, rgba(8,12,26,.72), rgba(3,4,10,.94));
+    backdrop-filter: blur(2px);
+    -webkit-backdrop-filter: blur(2px);
+  }
+  #overlay[hidden] { display: none; }
+
+  .panel {
+    width: min(420px, 100%);
+    text-align: center;
+    animation: rise .28s cubic-bezier(.2,.9,.3,1) both;
+  }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(14px); }
+    to   { opacity: 1; transform: none; }
+  }
+
+  .title {
+    font-size: clamp(34px, 12vw, 76px);
+    font-weight: 800;
+    letter-spacing: .1em;
+    line-height: 1;
+    margin-bottom: 6px;
+    color: #fff;
+    text-shadow: 0 0 12px var(--neon), 0 0 38px rgba(77,243,255,.55);
+  }
+  .subtitle {
+    font-size: 13px;
+    letter-spacing: .3em;
+    text-transform: uppercase;
+    color: rgba(232,246,255,.5);
+    margin-bottom: 34px;
+  }
+
+  .hint {
+    font-size: 15px;
+    line-height: 1.6;
+    color: rgba(232,246,255,.78);
+    margin-bottom: 30px;
+  }
+  .hint b { color: var(--neon); font-weight: 600; }
+
+  .scores {
+    display: flex;
+    justify-content: center;
+    gap: 40px;
+    margin-bottom: 32px;
+  }
+  .score-block .label {
+    font-size: 11px;
+    letter-spacing: .22em;
+    text-transform: uppercase;
+    color: rgba(232,246,255,.45);
+    margin-bottom: 4px;
+  }
+  .score-block .value {
+    font-size: 34px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: #fff;
+  }
+  .score-block.best .value { color: var(--neon); }
+  .score-block .value.new-best { color: var(--hot); text-shadow: 0 0 18px rgba(255,61,129,.7); }
+
+  .stats {
+    font-size: 13px;
+    color: rgba(232,246,255,.5);
+    margin-bottom: 28px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  button {
+    -webkit-appearance: none;
+    appearance: none;
+    font: inherit;
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--bg);
+    background: var(--neon);
+    border: 0;
+    border-radius: 999px;
+    padding: 17px 46px;
+    cursor: pointer;
+    touch-action: manipulation;
+    box-shadow: 0 0 30px rgba(77,243,255,.45);
+    transition: transform .1s ease, box-shadow .2s ease;
+  }
+  button:active { transform: scale(.96); box-shadow: 0 0 14px rgba(77,243,255,.3); }
+
+  .gameover .title { color: var(--hot); text-shadow: 0 0 12px var(--hot), 0 0 38px rgba(255,61,129,.5); }
+</style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <div id="safe-probe"></div>
+
+  <div id="overlay">
+    <div class="panel" id="panel"></div>
+  </div>
+
+  <script src="game.js"></script>
+</body>
+</html>
