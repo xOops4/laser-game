@@ -44,9 +44,12 @@ les autres, le score qu'il reste à atteindre. On en change d'une tape.
 | Arme | Palier | Ce qu'elle vaut |
 | --- | --- | --- |
 | Rayon | dès le départ | Polyvalent. Perce, porte jusqu'au bord de l'écran. |
-| Éventail | 400 | Trois rayons courts. Nettoie les nuées, impuissant au loin. |
-| Lance | 1 200 | Une seule cible à la fois, dégâts énormes. Visée exigeante. |
-| Onde | 2 800 | Impulsions circulaires autour du noyau. Ignore la visée, portée courte. |
+| Éventail | 350 | Trois rayons courts. Nettoie les nuées, impuissant au loin. |
+| Lance | 950 | Une seule cible à la fois, dégâts énormes. Visée exigeante. |
+| Onde | 2 100 | Impulsions circulaires autour du noyau. Ignore la visée, portée courte. |
+
+Les paliers sont réglés pour qu'un joueur correct les franchisse vers 25 s,
+40 s et 60 s.
 
 Aucune n'est strictement meilleure qu'une autre : la Lance démonte un tank que
 l'Éventail ne griffe pas, l'Onde sauve quand trois ennemis arrivent en même
@@ -57,8 +60,8 @@ temps par trois côtés.
 | Ennemi | Forme | Comportement |
 | --- | --- | --- |
 | Grunt | Triangle orange | Le tout-venant. Meurt en ~0,3 s de rayon. |
-| Darter | Losange jaune | Rapide et fragile, apparaît après 16 s. Punit les balayages lents. |
-| Tank | Hexagone violet | Lent mais très résistant, apparaît après 34 s. Frappe fort. |
+| Darter | Losange jaune | Rapide et fragile, apparaît après 20 s. Punit les balayages lents. |
+| Tank | Hexagone violet | Lent mais très résistant, apparaît après 42 s. Frappe fort. |
 
 La cadence d'apparition et la vitesse des ennemis montent en continu : pas de
 vagues ni de temps mort.
@@ -81,12 +84,28 @@ Ajouter une arme se limite à une entrée dans `WEAPONS` et un pictogramme dans
 L'objet `window.VIRGULE` expose l'état du jeu pour inspection depuis la console
 du navigateur.
 
+## Son
+
+Tout est synthétisé à la volée en WebAudio — oscillateurs et bruit blanc
+filtré — donc aucun fichier à télécharger. Chaque arme a son bourdonnement de
+tir ; les impacts, les explosions, les paliers de combo et les déblocages ont
+leur signature. Les rafales sont bridées pour ne pas saturer la sortie.
+
+Le contexte audio ne peut naître que dans un geste utilisateur (iOS l'exige),
+il s'ouvre donc au premier appui. Le bouton en haut à droite coupe le son ;
+le choix est retenu en `localStorage`.
+
 ## Détails techniques
 
 - Coordonnées en pixels CSS, `devicePixelRatio` absorbé par une transformation
   du contexte (plafonné à 2 pour ne pas écrouler les écrans très denses).
 - Les effets lumineux utilisent trois passes additives plutôt que `shadowBlur`,
   nettement moins coûteux sur mobile.
+- Les particules ont deux formes : `dot` (carré, bon marché) et `streak`
+  (segment étiré par la vitesse, réservé aux explosions). Plafond à 900. Les
+  traînées de réacteur se coupent au-delà de 45 ennemis pour tenir le budget.
+- Le fond n'est pas fixe : la poussière dérive vers le noyau avec un effet de
+  parallaxe, et se régénère au bord une fois absorbée.
 - Gestes natifs neutralisés : zoom au double-tap, scroll élastique, sélection,
   surbrillance au tap. Encoches gérées via `env(safe-area-inset-*)`.
 - Pas de temps borné à 50 ms : un retour d'arrière-plan ne téléporte pas les
@@ -97,11 +116,11 @@ du navigateur.
   bloqué (navigation privée, iframe sandboxée).
 - Vibration courte quand le noyau encaisse, sur les appareils qui la supportent.
 
-Mesuré à 60 fps en émulation iPhone 13 avec 120 ennemis à l'écran et le rayon
-actif.
+Mesuré à 60 fps en émulation iPhone 13 avec 100 ennemis à l'écran, le rayon
+actif et les explosions en chaîne.
 
 ## Pas encore fait
 
-Volontairement laissé de côté : le son, les bonus à ramasser, les ennemis qui
-tirent à distance, les boss, l'installation en PWA hors-ligne, et toute
-progression conservée d'une partie à l'autre (seul le record l'est).
+Volontairement laissé de côté : les bonus à ramasser, les ennemis qui tirent à
+distance, les boss, l'installation en PWA hors-ligne, et toute progression
+conservée d'une partie à l'autre (seul le record l'est).

@@ -14,7 +14,7 @@
 
 const CFG = {
   core: {
-    hpMax: 100,
+    hpMax: 120,
     radiusFactor: 0.075,   // fraction de la plus petite dimension de l'écran
     radiusMin: 26,
     radiusMax: 58,
@@ -24,12 +24,13 @@ const CFG = {
     max: 10,
   },
   spawn: {
-    startInterval: 1.05,   // secondes entre deux apparitions au début
-    endInterval: 0.34,     // ... et une fois la difficulté au maximum
-    rampTime: 150,         // secondes pour atteindre le maximum
-    speedRampTime: 210,    // les ennemis gagnent +100% de vitesse sur cette durée
+    startInterval: 1.25,   // secondes entre deux apparitions au début
+    endInterval: 0.45,     // ... et une fois la difficulté au maximum
+    rampTime: 180,         // secondes pour atteindre le maximum
+    speedRampTime: 280,    // les ennemis gagnent +100% de vitesse sur cette durée
   },
-  particlesMax: 420,
+  particlesMax: 900,
+  ringsMax: 40,
 };
 
 /*
@@ -51,19 +52,19 @@ const WEAPONS = [
     blurb: 'Polyvalent. Traverse tout ce qui est aligné.',
   },
   {
-    id: 'fan', name: 'Éventail', unlock: 400, color: '#5dffa0',
+    id: 'fan', name: 'Éventail', unlock: 350, color: '#5dffa0',
     kind: 'beam', beams: [-0.34, 0, 0.34], dps: 58, range: 0.5, pierce: true,
     halfWidth: 4, slack: 5, slackPerPx: 0.03,
     blurb: 'Trois rayons courts. Nettoie les nuées, impuissant au loin.',
   },
   {
-    id: 'lance', name: 'Lance', unlock: 1200, color: '#ff3d81',
+    id: 'lance', name: 'Lance', unlock: 950, color: '#ff3d81',
     kind: 'beam', beams: [0], dps: 340, range: 1, pierce: false,
     halfWidth: 3, slack: 1, slackPerPx: 0.007,
     blurb: 'Une seule cible, dégâts énormes. Visée exigeante.',
   },
   {
-    id: 'wave', name: 'Onde', unlock: 2800, color: '#c9a3ff',
+    id: 'wave', name: 'Onde', unlock: 2100, color: '#c9a3ff',
     kind: 'wave', interval: 1.05, pulseDamage: 52, radiusFactor: 0.42,
     blurb: 'Impulsions circulaires. Ignore la visée, ne porte pas loin.',
   },
@@ -72,16 +73,16 @@ const WEAPONS = [
 /* Types d'ennemis. `unlock` = secondes avant qu'il puisse apparaître. */
 const ENEMY_TYPES = {
   grunt: {
-    hp: 30, speed: 50, radius: 13, damage: 10, score: 10,
+    hp: 30, speed: 42, radius: 13, damage: 10, score: 10,
     color: '#ff6a3d', shape: 'triangle', orient: 'aim', unlock: 0, weight: 10,
   },
   darter: {
-    hp: 16, speed: 100, radius: 9, damage: 6, score: 15,
-    color: '#ffd23f', shape: 'diamond', orient: 'aim', unlock: 16, weight: 7,
+    hp: 16, speed: 84, radius: 9, damage: 6, score: 15,
+    color: '#ffd23f', shape: 'diamond', orient: 'aim', unlock: 20, weight: 7,
   },
   tank: {
-    hp: 135, speed: 28, radius: 22, damage: 25, score: 40,
-    color: '#b06cff', shape: 'hex', orient: 'spin', unlock: 34, weight: 4,
+    hp: 135, speed: 24, radius: 22, damage: 22, score: 40,
+    color: '#b06cff', shape: 'hex', orient: 'spin', unlock: 42, weight: 4,
   },
 };
 
@@ -113,6 +114,7 @@ const panel = document.getElementById('panel');
 const safeProbe = document.getElementById('safe-probe');
 const weaponBar = document.getElementById('weapons');
 const toast = document.getElementById('toast');
+const soundBtn = document.getElementById('sound');
 
 /* Toutes les coordonnées du jeu sont en pixels CSS ; le DPR est absorbé
    par une transformation appliquée une fois pour toutes au resize. */
@@ -165,16 +167,29 @@ function resize() {
 let stars = [];
 
 function buildStarfield() {
-  const count = Math.round((view.w * view.h) / 14000);
+  const count = Math.round((view.w * view.h) / 11000);
   stars = new Array(count);
-  for (let i = 0; i < count; i++) {
-    stars[i] = {
-      x: Math.random() * view.w,
-      y: Math.random() * view.h,
-      r: rand(0.4, 1.5),
-      a: rand(0.08, 0.42),
-      phase: Math.random() * TAU,
-    };
+  for (let i = 0; i < count; i++) stars[i] = newStar(rand(0, 1));
+}
+
+/** Poussière aspirée par le noyau. `t` place l'étoile sur sa course (0 = bord). */
+function newStar(t) {
+  const angle = Math.random() * TAU;
+  return {
+    angle,
+    dist: lerp(view.spawnRadius, view.coreRadius, t),
+    speed: rand(4, 22),          // parallaxe : les proches filent plus vite
+    r: rand(0.4, 1.6),
+    a: rand(0.08, 0.42),
+    phase: Math.random() * TAU,
+  };
+}
+
+function updateStars(dt) {
+  for (let i = 0; i < stars.length; i++) {
+    const s = stars[i];
+    s.dist -= s.speed * dt;
+    if (s.dist <= view.coreRadius) stars[i] = newStar(0);
   }
 }
 
@@ -268,6 +283,9 @@ canvas.addEventListener('pointerdown', (e) => {
   input.pointerId = e.pointerId;
   input.active = true;
   updateAngleFrom(e);
+  audioInit();          // premier geste utilisateur : iOS n'autorise que là
+  audioResume();
+  if (game.state === STATE.PLAYING) humStart();
   if (canvas.setPointerCapture) {
     try { canvas.setPointerCapture(e.pointerId); } catch (_) { /* ignore */ }
   }
@@ -284,13 +302,18 @@ function releasePointer(e) {
   if (e.pointerId !== input.pointerId) return;
   input.pointerId = null;
   input.active = false;
+  humStop();
 }
 canvas.addEventListener('pointerup', releasePointer);
 canvas.addEventListener('pointercancel', releasePointer);
 
 /* Filet de sécurité : un doigt relevé hors du canvas ne doit pas laisser
    le laser bloqué en position allumée. */
-window.addEventListener('blur', () => { input.pointerId = null; input.active = false; });
+window.addEventListener('blur', () => {
+  input.pointerId = null;
+  input.active = false;
+  humStop();
+});
 
 /* Mise en pause automatique quand l'onglet passe en arrière-plan. */
 document.addEventListener('visibilitychange', () => {
@@ -298,9 +321,224 @@ document.addEventListener('visibilitychange', () => {
     game.state = STATE.PAUSED;
     input.pointerId = null;
     input.active = false;
+    humStop();
     showPause();
+  } else if (!document.hidden) {
+    audioResume();
   }
 });
+
+/* ------------------------------------------------------------------ *
+ *  Son
+ *
+ *  Tout est synthétisé à la volée : oscillateurs et bruit blanc filtré,
+ *  aucun fichier à charger. Le contexte ne peut naître que dans un geste
+ *  utilisateur (iOS l'exige), d'où l'initialisation au premier appui.
+ * ------------------------------------------------------------------ */
+
+const SOUND_KEY = 'virgule.sound';
+
+const audio = {
+  ctx: null,
+  master: null,
+  noise: null,      // buffer de bruit blanc réutilisé par tous les impacts
+  hum: null,        // { osc1, osc2, gain, filter } du bourdonnement de tir
+  on: loadSound(),
+  lastHit: -1,      // horodatages pour brider les sons en rafale
+  lastKill: -1,
+};
+
+function loadSound() {
+  try { return localStorage.getItem(SOUND_KEY) !== 'off'; } catch (_) { return true; }
+}
+
+function audioInit() {
+  if (audio.ctx) return;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+
+  audio.ctx = new AC();
+  audio.master = audio.ctx.createGain();
+  audio.master.gain.value = audio.on ? 0.34 : 0;
+  audio.master.connect(audio.ctx.destination);
+
+  const len = Math.floor(audio.ctx.sampleRate * 0.4);
+  const buf = audio.ctx.createBuffer(1, len, audio.ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+  audio.noise = buf;
+}
+
+/** Le contexte se suspend tout seul en arrière-plan : on le réveille. */
+function audioResume() {
+  if (audio.ctx && audio.ctx.state === 'suspended') audio.ctx.resume();
+}
+
+function audioReady() {
+  return audio.ctx && audio.on;
+}
+
+/** Note simple, avec glissando optionnel vers `to`. */
+function tone(freq, dur, opts) {
+  if (!audioReady()) return;
+  const o = opts || {};
+  const t = audio.ctx.currentTime + (o.delay || 0);
+
+  const osc = audio.ctx.createOscillator();
+  const gain = audio.ctx.createGain();
+  osc.type = o.type || 'sine';
+  osc.frequency.setValueAtTime(freq, t);
+  if (o.to) osc.frequency.exponentialRampToValueAtTime(o.to, t + dur);
+
+  gain.gain.setValueAtTime(0.0001, t);
+  gain.gain.exponentialRampToValueAtTime(o.gain || 0.3, t + 0.008);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+
+  osc.connect(gain).connect(audio.master);
+  osc.start(t);
+  osc.stop(t + dur + 0.02);
+}
+
+/** Souffle de bruit filtré : impacts, explosions, chocs. */
+function noiseBurst(dur, opts) {
+  if (!audioReady()) return;
+  const o = opts || {};
+  const t = audio.ctx.currentTime + (o.delay || 0);
+
+  const src = audio.ctx.createBufferSource();
+  src.buffer = audio.noise;
+
+  const filter = audio.ctx.createBiquadFilter();
+  filter.type = o.type || 'bandpass';
+  filter.frequency.setValueAtTime(o.freq || 1200, t);
+  if (o.freqTo) filter.frequency.exponentialRampToValueAtTime(o.freqTo, t + dur);
+  filter.Q.value = o.q || 1;
+
+  const gain = audio.ctx.createGain();
+  gain.gain.setValueAtTime(o.gain || 0.3, t);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+
+  src.connect(filter).connect(gain).connect(audio.master);
+  src.start(t);
+  src.stop(t + dur + 0.02);
+}
+
+/* Timbre du bourdonnement, par arme. */
+const HUM = {
+  ray:   { freq: 128, detune: 7,  type: 'sawtooth', cutoff: 900,  gain: 0.09 },
+  fan:   { freq: 88,  detune: 13, type: 'square',   cutoff: 700,  gain: 0.08 },
+  lance: { freq: 196, detune: 4,  type: 'sawtooth', cutoff: 1500, gain: 0.10 },
+};
+
+function humStart() {
+  if (!audioReady() || audio.hum) return;
+  const spec = HUM[currentWeapon().id];
+  if (!spec) return;                       // l'Onde n'a pas de tir continu
+
+  const t = audio.ctx.currentTime;
+  const filter = audio.ctx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.value = spec.cutoff;
+
+  const gain = audio.ctx.createGain();
+  gain.gain.setValueAtTime(0.0001, t);
+  gain.gain.exponentialRampToValueAtTime(spec.gain, t + 0.04);
+
+  const osc1 = audio.ctx.createOscillator();
+  const osc2 = audio.ctx.createOscillator();
+  osc1.type = osc2.type = spec.type;
+  osc1.frequency.value = spec.freq;
+  osc2.frequency.value = spec.freq;
+  osc2.detune.value = spec.detune;
+
+  osc1.connect(filter);
+  osc2.connect(filter);
+  filter.connect(gain).connect(audio.master);
+  osc1.start(t);
+  osc2.start(t);
+
+  audio.hum = { osc1, osc2, gain };
+}
+
+function humStop() {
+  if (!audio.hum) return;
+  const { osc1, osc2, gain } = audio.hum;
+  audio.hum = null;
+
+  const t = audio.ctx.currentTime;
+  gain.gain.cancelScheduledValues(t);
+  gain.gain.setValueAtTime(Math.max(gain.gain.value, 0.0001), t);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.06);
+  osc1.stop(t + 0.09);
+  osc2.stop(t + 0.09);
+}
+
+/* Effets ponctuels. Les rafales sont bridées pour ne pas saturer la sortie. */
+
+function sfxHit() {
+  if (game.corePulse - audio.lastHit < 0.045) return;
+  audio.lastHit = game.corePulse;
+  noiseBurst(0.045, { freq: 2600, q: 3, gain: 0.06 });
+}
+
+function sfxKill(enemy) {
+  if (game.corePulse - audio.lastKill < 0.035) return;
+  audio.lastKill = game.corePulse;
+  const big = enemy.hpMax > 60;
+  noiseBurst(big ? 0.34 : 0.16, {
+    type: 'lowpass', freq: big ? 1500 : 2400, freqTo: big ? 120 : 320,
+    gain: big ? 0.3 : 0.16,
+  });
+  tone(big ? 150 : 420, big ? 0.26 : 0.1, {
+    to: big ? 44 : 150, type: 'triangle', gain: big ? 0.22 : 0.1,
+  });
+}
+
+function sfxCoreHit(enemy) {
+  noiseBurst(0.4, { type: 'lowpass', freq: 900, freqTo: 70, gain: 0.36 });
+  tone(110, 0.3, { to: 38, type: 'sine', gain: 0.34 });
+  if (enemy.def.damage >= 20) tone(70, 0.45, { to: 30, type: 'sine', gain: 0.3 });
+}
+
+function sfxWave() {
+  noiseBurst(0.42, { type: 'lowpass', freq: 700, freqTo: 90, gain: 0.24 });
+  tone(180, 0.36, { to: 60, type: 'sine', gain: 0.24 });
+}
+
+function sfxCombo(mult) {
+  const base = 520 * Math.pow(1.06, mult);
+  tone(base, 0.1, { type: 'triangle', gain: 0.14 });
+  tone(base * 1.5, 0.12, { type: 'triangle', gain: 0.1, delay: 0.06 });
+}
+
+function sfxUnlock() {
+  [0, 0.09, 0.18].forEach((d, i) => {
+    tone(440 * Math.pow(1.26, i), 0.24, {
+      type: 'triangle', gain: 0.2, delay: d,
+    });
+  });
+}
+
+function sfxSwitch() {
+  tone(880, 0.05, { type: 'square', gain: 0.08 });
+}
+
+function sfxGameOver() {
+  humStop();
+  noiseBurst(1.1, { type: 'lowpass', freq: 1800, freqTo: 60, gain: 0.34 });
+  tone(320, 1.2, { to: 40, type: 'sawtooth', gain: 0.26 });
+  tone(160, 1.3, { to: 30, type: 'sine', gain: 0.22, delay: 0.05 });
+}
+
+function setSound(on) {
+  audio.on = on;
+  try { localStorage.setItem(SOUND_KEY, on ? 'on' : 'off'); } catch (_) { /* tant pis */ }
+  if (audio.master) {
+    audio.master.gain.setTargetAtTime(on ? 0.34 : 0, audio.ctx.currentTime, 0.02);
+  }
+  if (!on) humStop();
+  renderSoundButton();
+}
 
 /* ------------------------------------------------------------------ *
  *  Vibration
@@ -356,6 +594,7 @@ function spawnEnemy() {
     rot: angle + Math.PI,
     spin: rand(-1.6, 1.6),
     seed: Math.random() * TAU,
+    trail: rand(0, 0.055),
     flash: 0,
   });
 }
@@ -364,35 +603,102 @@ function killEnemy(enemy, index) {
   game.enemies.splice(index, 1);
   game.kills++;
   game.combo++;
+
+  const before = game.multiplier;
   game.multiplier = clamp(
     1 + Math.floor(game.combo / CFG.combo.killsPerStep),
     1,
     CFG.combo.max
   );
   game.score += enemy.def.score * game.multiplier;
-  burst(enemy.x, enemy.y, enemy.def.color, Math.round(8 + enemy.radius * 0.9));
+
+  const big = enemy.hpMax > 60;
+  const size = enemy.radius;
+
+  shards(enemy.x, enemy.y, enemy.def.color, Math.round(9 + size * 0.8), big ? 1.35 : 1);
+  burst(enemy.x, enemy.y, '#ffffff', Math.round(4 + size * 0.35), 0.85);
+  embers(enemy.x, enemy.y, enemy.def.color, Math.round(3 + size * 0.4));
+  shockRingAt(enemy.x, enemy.y, enemy.def.color, size * (big ? 4.2 : 2.8), big ? 0.4 : 0.28);
+
+  if (big) game.shake = Math.max(game.shake, 6);
+  sfxKill(enemy);
+
+  // Palier de combo franchi : anneau doré et petit carillon.
+  if (game.multiplier > before) {
+    shockRing('#ffd23f', view.coreRadius * 3.4, 0.5, 2);
+    sfxCombo(game.multiplier);
+  }
 }
 
 /* ------------------------------------------------------------------ *
  *  Particules
  * ------------------------------------------------------------------ */
 
+/**
+ * Une particule = position, vitesse, durée de vie, et une forme parmi deux :
+ * `dot` (carré) ou `streak` (segment orienté par la vitesse). Le second coûte
+ * plus cher à dessiner, on le réserve aux explosions.
+ */
+function addParticle(p) {
+  if (game.particles.length >= CFG.particlesMax) return;
+  game.particles.push(p);
+}
+
+/** Gerbe d'étincelles omnidirectionnelle. */
 function burst(x, y, color, count, spread) {
   const speed = spread || 1;
   for (let i = 0; i < count; i++) {
-    if (game.particles.length >= CFG.particlesMax) break;
     const a = Math.random() * TAU;
     const v = rand(40, 260) * speed;
-    game.particles.push({
-      x, y,
-      vx: Math.cos(a) * v,
-      vy: Math.sin(a) * v,
-      life: rand(0.25, 0.7),
-      maxLife: 0.7,
-      size: rand(1.2, 3.2),
-      color,
+    addParticle({
+      x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v,
+      life: rand(0.25, 0.7), maxLife: 0.7,
+      size: rand(1.2, 3.2), drag: 0.94, shape: 'dot', color,
     });
   }
+}
+
+/** Éclats rapides et allongés : le corps de l'ennemi qui part en morceaux. */
+function shards(x, y, color, count, speed) {
+  for (let i = 0; i < count; i++) {
+    const a = Math.random() * TAU;
+    const v = rand(120, 460) * (speed || 1);
+    addParticle({
+      x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v,
+      life: rand(0.3, 0.75), maxLife: 0.75,
+      size: rand(1.4, 2.6), drag: 0.955, shape: 'streak', color,
+    });
+  }
+}
+
+/** Braises lentes qui s'attardent après l'explosion. */
+function embers(x, y, color, count) {
+  for (let i = 0; i < count; i++) {
+    const a = Math.random() * TAU;
+    const v = rand(10, 70);
+    addParticle({
+      x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v,
+      life: rand(0.6, 1.4), maxLife: 1.4,
+      size: rand(1, 2.2), drag: 0.985, shape: 'dot', color,
+    });
+  }
+}
+
+/** Anneau de choc. Tous les événements marquants en émettent un. */
+function shockRing(color, max, life, width) {
+  if (game.rings.length >= CFG.ringsMax) return;
+  game.rings.push({
+    r0: view.coreRadius, max, life, maxLife: life,
+    color, width: width || 3, x: view.cx, y: view.cy,
+  });
+}
+
+/** Variante centrée ailleurs que sur le noyau (mort d'un ennemi). */
+function shockRingAt(x, y, color, max, life, width) {
+  if (game.rings.length >= CFG.ringsMax) return;
+  game.rings.push({
+    r0: 2, max, life, maxLife: life, color, width: width || 2, x, y,
+  });
 }
 
 function updateParticles(dt) {
@@ -403,8 +709,8 @@ function updateParticles(dt) {
     if (p.life <= 0) { list.splice(i, 1); continue; }
     p.x += p.vx * dt;
     p.y += p.vy * dt;
-    p.vx *= 0.94;   // friction : les étincelles retombent vite
-    p.vy *= 0.94;
+    p.vx *= p.drag;   // friction : les étincelles retombent vite
+    p.vy *= p.drag;
   }
 }
 
@@ -443,6 +749,7 @@ function update(dt) {
 
   updateParticles(dt);
   updateRings(dt);
+  updateStars(dt);
 
   game.shake = Math.max(0, game.shake - dt * 42);
   game.coreFlash = Math.max(0, game.coreFlash - dt * 4);
@@ -456,6 +763,7 @@ function update(dt) {
 
 function updateEnemies(dt) {
   const contactBase = view.coreRadius;
+  const trails = game.enemies.length <= 45;
 
   for (let i = game.enemies.length - 1; i >= 0; i--) {
     const e = game.enemies[i];
@@ -467,6 +775,21 @@ function updateEnemies(dt) {
     e.x += (dx / dist) * e.speed * dt;
     e.y += (dy / dist) * e.speed * dt;
     e.flash = Math.max(0, e.flash - dt * 12);
+
+    // Traînée de réacteur. Coupée quand l'écran se remplit, pour tenir le budget.
+    if (trails) {
+      e.trail -= dt;
+      if (e.trail <= 0) {
+        e.trail = 0.055;
+        addParticle({
+          x: e.x - (dx / dist) * e.radius * 0.8 + rand(-2, 2),
+          y: e.y - (dy / dist) * e.radius * 0.8 + rand(-2, 2),
+          vx: -(dx / dist) * 18, vy: -(dy / dist) * 18,
+          life: rand(0.18, 0.4), maxLife: 0.4,
+          size: rand(0.9, 1.9), drag: 0.94, shape: 'dot', color: e.def.color,
+        });
+      }
+    }
 
     if (e.def.orient === 'aim') {
       // Nez pointé vers le noyau, avec un léger roulis pour que ça vive.
@@ -488,8 +811,14 @@ function hitCore(enemy) {
   game.multiplier = 1;
   game.shake = Math.min(22, 8 + enemy.def.damage * 0.4);
   game.coreFlash = 1;
-  burst(enemy.x, enemy.y, '#ffffff', 14, 1.3);
+
+  shards(enemy.x, enemy.y, '#ffffff', 16, 1.4);
+  shards(enemy.x, enemy.y, enemy.def.color, 10, 1.1);
+  embers(enemy.x, enemy.y, '#ff3d81', 8);
+  shockRing('#ff3d81', view.coreRadius * 4.6, 0.5, 4);
+
   vibrate(enemy.def.damage >= 20 ? 55 : 30);
+  sfxCoreHit(enemy);
 
   if (game.hp <= 0) {
     game.hp = 0;
@@ -503,9 +832,16 @@ function endGame() {
   game.shake = 30;
   input.active = false;
   input.pointerId = null;
-  burst(view.cx, view.cy, '#4df3ff', 90, 2.4);
-  burst(view.cx, view.cy, '#ff3d81', 60, 1.8);
+
+  shards(view.cx, view.cy, '#4df3ff', 90, 2.6);
+  shards(view.cx, view.cy, '#ff3d81', 60, 1.9);
+  burst(view.cx, view.cy, '#ffffff', 50, 2.2);
+  embers(view.cx, view.cy, '#4df3ff', 40);
+  shockRing('#ffffff', view.spawnRadius * 0.9, 0.7, 6);
+  shockRing('#ff3d81', view.spawnRadius * 0.65, 0.9, 3);
+
   vibrate([40, 60, 120]);
+  sfxGameOver();
 
   if (game.score > game.best) {
     game.best = game.score;
@@ -576,8 +912,22 @@ function fireWave(w, dt) {
   if (game.waveTimer > 0) return;
   game.waveTimer += w.interval;
 
-  game.rings.push({ r: view.coreRadius, max: radius, life: 0.45, maxLife: 0.45 });
-  game.shake = Math.max(game.shake, 4);
+  shockRing(w.color, radius, 0.45, 4);
+  game.shake = Math.max(game.shake, 5);
+  sfxWave();
+
+  // Poussière soulevée le long du front de l'onde.
+  for (let i = 0; i < 22; i++) {
+    const a = Math.random() * TAU;
+    const v = rand(160, 320);
+    addParticle({
+      x: view.cx + Math.cos(a) * view.coreRadius,
+      y: view.cy + Math.sin(a) * view.coreRadius,
+      vx: Math.cos(a) * v, vy: Math.sin(a) * v,
+      life: rand(0.25, 0.45), maxLife: 0.45,
+      size: rand(1, 2.4), drag: 0.93, shape: 'streak', color: w.color,
+    });
+  }
 
   for (let i = game.enemies.length - 1; i >= 0; i--) {
     const e = game.enemies[i];
@@ -597,10 +947,25 @@ function hitEnemy(enemy, index, damage, ux, uy) {
 
   if (enemy.hp <= 0) {
     killEnemy(enemy, index);
-  } else if (sparkCooldown <= 0) {
-    // Étincelles limitées dans le temps pour ne pas noyer le rendu.
-    burst(enemy.x - ux * enemy.radius, enemy.y - uy * enemy.radius, '#ffffff', 2, 0.5);
-    sparkCooldown = 0.03;
+    return;
+  }
+
+  if (sparkCooldown > 0) return;
+  sparkCooldown = 0.028;
+  sfxHit();
+
+  // Les étincelles giclent à contresens du tir, depuis le point d'impact.
+  const ix = enemy.x - ux * enemy.radius;
+  const iy = enemy.y - uy * enemy.radius;
+  for (let i = 0; i < 3; i++) {
+    const a = Math.atan2(-uy, -ux) + rand(-0.9, 0.9);
+    const v = rand(90, 300);
+    addParticle({
+      x: ix, y: iy, vx: Math.cos(a) * v, vy: Math.sin(a) * v,
+      life: rand(0.12, 0.3), maxLife: 0.3,
+      size: rand(1, 2.4), drag: 0.9, shape: 'streak',
+      color: i === 0 ? '#ffffff' : enemy.def.color,
+    });
   }
 }
 
@@ -678,13 +1043,21 @@ function render() {
 
 function drawStars() {
   ctx.globalCompositeOperation = 'lighter';
+  ctx.fillStyle = '#9fdcff';
   const t = game.corePulse;
+
   for (let i = 0; i < stars.length; i++) {
     const s = stars[i];
-    ctx.globalAlpha = s.a * (0.65 + 0.35 * Math.sin(t * 1.4 + s.phase));
-    ctx.fillStyle = '#9fdcff';
-    ctx.fillRect(s.x, s.y, s.r, s.r);
+    // Fond au repos près du bord, s'estompe en approchant du noyau.
+    const fade = clamp((s.dist - view.coreRadius) / (view.coreRadius * 2), 0, 1);
+    ctx.globalAlpha = s.a * fade * (0.65 + 0.35 * Math.sin(t * 1.4 + s.phase));
+    ctx.fillRect(
+      view.cx + Math.cos(s.angle) * s.dist,
+      view.cy + Math.sin(s.angle) * s.dist,
+      s.r, s.r
+    );
   }
+
   ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = 'source-over';
 }
@@ -740,27 +1113,26 @@ function drawWeapon() {
   ctx.globalCompositeOperation = 'source-over';
 }
 
-/** Les impulsions de l'Onde : un anneau qui s'ouvre et s'estompe. */
+/** Anneaux de choc : impulsions de l'Onde, morts, paliers de combo, impacts. */
 function drawRings() {
   if (!game.rings.length) return;
-  const color = WEAPONS.find((w) => w.kind === 'wave').color;
 
   ctx.globalCompositeOperation = 'lighter';
   for (const ring of game.rings) {
     const t = 1 - ring.life / ring.maxLife;
-    const r = lerp(view.coreRadius, ring.max, t * (2 - t)); // décélère en fin de course
+    const r = lerp(ring.r0, ring.max, t * (2 - t));   // décélère en fin de course
     const alpha = (1 - t) * 0.9;
 
-    ctx.strokeStyle = hexToRgba(color, alpha * 0.35);
-    ctx.lineWidth = 14;
+    ctx.strokeStyle = hexToRgba(ring.color, alpha * 0.3);
+    ctx.lineWidth = ring.width * 4;
     ctx.beginPath();
-    ctx.arc(view.cx, view.cy, r, 0, TAU);
+    ctx.arc(ring.x, ring.y, r, 0, TAU);
     ctx.stroke();
 
-    ctx.strokeStyle = hexToRgba(color, alpha);
-    ctx.lineWidth = 3;
+    ctx.strokeStyle = hexToRgba(ring.color, alpha);
+    ctx.lineWidth = ring.width;
     ctx.beginPath();
-    ctx.arc(view.cx, view.cy, r, 0, TAU);
+    ctx.arc(ring.x, ring.y, r, 0, TAU);
     ctx.stroke();
   }
   ctx.globalCompositeOperation = 'source-over';
@@ -888,12 +1260,27 @@ function drawCore() {
 
 function drawParticles() {
   ctx.globalCompositeOperation = 'lighter';
+  ctx.lineCap = 'round';
+
   for (const p of game.particles) {
     ctx.globalAlpha = clamp(p.life / p.maxLife, 0, 1);
-    ctx.fillStyle = p.color;
-    ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+
+    if (p.shape === 'streak') {
+      // La traîne suit la vitesse : plus la particule file, plus elle s'étire.
+      ctx.strokeStyle = p.color;
+      ctx.lineWidth = p.size;
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(p.x - p.vx * 0.022, p.y - p.vy * 0.022);
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+    }
   }
+
   ctx.globalAlpha = 1;
+  ctx.lineCap = 'butt';
   ctx.globalCompositeOperation = 'source-over';
 }
 
@@ -919,11 +1306,11 @@ function drawHud() {
     ctx.fillText(`×${game.multiplier}`, padX, padY + Math.round(32 * s));
   }
 
-  // Chrono
-  ctx.textAlign = 'right';
+  // Chrono, centré : le coin droit appartient au coupe-son.
+  ctx.textAlign = 'center';
   ctx.fillStyle = 'rgba(232,246,255,0.55)';
   ctx.font = `600 ${Math.round(15 * s)}px ui-sans-serif, system-ui, sans-serif`;
-  ctx.fillText(formatTime(game.time), view.w - padX, padY + 4);
+  ctx.fillText(formatTime(game.time), view.w / 2, padY + 6);
 }
 
 function formatTime(t) {
@@ -991,6 +1378,28 @@ weaponBar.addEventListener('click', (e) => {
   game.waveTimer = 0;   // l'Onde frappe dès qu'on la sélectionne
   renderWeaponBar();
   vibrate(12);
+  audioInit();
+  sfxSwitch();
+});
+
+function renderSoundButton() {
+  const waves = audio.on
+    ? '<path d="M11.5 7a4.5 4.5 0 0 1 0 6"/><path d="M14 4.5a8 8 0 0 1 0 11"/>'
+    : '<path d="M12.5 7 17 13"/><path d="M17 7l-4.5 6"/>';
+  soundBtn.classList.toggle('on', audio.on);
+  soundBtn.setAttribute('aria-pressed', String(audio.on));
+  soundBtn.setAttribute('aria-label', audio.on ? 'Couper le son' : 'Activer le son');
+  soundBtn.innerHTML = `<svg width="19" height="19" viewBox="0 0 20 20" aria-hidden="true"
+    fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+    stroke-linejoin="round"><path d="M3 7.5h2.5L9 4.5v11L5.5 12.5H3z"
+    fill="currentColor" stroke="none"/>${waves}</svg>`;
+}
+
+soundBtn.addEventListener('click', () => {
+  audioInit();
+  audioResume();
+  setSound(!audio.on);
+  if (audio.on) sfxSwitch();
 });
 
 function announceUnlock(w) {
@@ -1003,7 +1412,11 @@ function announceUnlock(w) {
   toast.classList.remove('show');
   void toast.offsetWidth;
   toast.classList.add('show');
+
+  shockRing(w.color, view.spawnRadius * 0.55, 0.8, 3);
+  burst(view.cx, view.cy, w.color, 40, 1.6);
   vibrate([15, 40, 15]);
+  sfxUnlock();
 }
 
 /* ------------------------------------------------------------------ *
@@ -1113,8 +1526,9 @@ window.addEventListener('resize', resize);
 window.addEventListener('orientationchange', () => setTimeout(resize, 120));
 
 resize();
+renderSoundButton();
 showMenu();
 requestAnimationFrame(frame);
 
 /* Poignée de débogage : permet d'inspecter l'état depuis la console. */
-window.VIRGULE = { game, view, input, CFG, ENEMY_TYPES };
+window.VIRGULE = { game, view, input, audio, CFG, ENEMY_TYPES, WEAPONS };
