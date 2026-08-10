@@ -19,38 +19,69 @@ const CFG = {
     radiusMin: 26,
     radiusMax: 58,
   },
-  laser: {
-    dps: 115,              // dégâts par seconde sur une cible
-    halfWidth: 5,          // demi-épaisseur physique du rayon, en px
-    aimSlack: 4,           // tolérance de visée de base, en px
-    aimSlackPerPx: 0.022,  // tolérance supplémentaire proportionnelle à la distance
-  },
   combo: {
     killsPerStep: 8,       // kills nécessaires pour +1 au multiplicateur
     max: 10,
   },
   spawn: {
-    startInterval: 0.85,   // secondes entre deux apparitions au début
-    endInterval: 0.22,     // ... et une fois la difficulté au maximum
-    rampTime: 120,         // secondes pour atteindre le maximum
-    speedRampTime: 150,    // les ennemis gagnent +100% de vitesse sur cette durée
+    startInterval: 1.05,   // secondes entre deux apparitions au début
+    endInterval: 0.34,     // ... et une fois la difficulté au maximum
+    rampTime: 150,         // secondes pour atteindre le maximum
+    speedRampTime: 210,    // les ennemis gagnent +100% de vitesse sur cette durée
   },
   particlesMax: 420,
 };
 
+/*
+ * Armes. La première est disponible d'emblée, les suivantes se débloquent
+ * au score indiqué, dans la partie en cours. Chacune a un vrai défaut :
+ * le choix doit dépendre de ce qui arrive à l'écran.
+ *
+ *  - beams   : décalages angulaires des rayons, en radians
+ *  - dps     : dégâts par seconde et par rayon
+ *  - range   : portée, en fraction du rayon d'apparition
+ *  - pierce  : false = seule la cible la plus proche encaisse
+ *  - slack   : tolérance de visée, fixe puis proportionnelle à la distance
+ */
+const WEAPONS = [
+  {
+    id: 'ray', name: 'Rayon', unlock: 0, color: '#4df3ff',
+    kind: 'beam', beams: [0], dps: 115, range: 1, pierce: true,
+    halfWidth: 5, slack: 4, slackPerPx: 0.022,
+    blurb: 'Polyvalent. Traverse tout ce qui est aligné.',
+  },
+  {
+    id: 'fan', name: 'Éventail', unlock: 400, color: '#5dffa0',
+    kind: 'beam', beams: [-0.34, 0, 0.34], dps: 58, range: 0.5, pierce: true,
+    halfWidth: 4, slack: 5, slackPerPx: 0.03,
+    blurb: 'Trois rayons courts. Nettoie les nuées, impuissant au loin.',
+  },
+  {
+    id: 'lance', name: 'Lance', unlock: 1200, color: '#ff3d81',
+    kind: 'beam', beams: [0], dps: 340, range: 1, pierce: false,
+    halfWidth: 3, slack: 1, slackPerPx: 0.007,
+    blurb: 'Une seule cible, dégâts énormes. Visée exigeante.',
+  },
+  {
+    id: 'wave', name: 'Onde', unlock: 2800, color: '#c9a3ff',
+    kind: 'wave', interval: 1.05, pulseDamage: 52, radiusFactor: 0.42,
+    blurb: 'Impulsions circulaires. Ignore la visée, ne porte pas loin.',
+  },
+];
+
 /* Types d'ennemis. `unlock` = secondes avant qu'il puisse apparaître. */
 const ENEMY_TYPES = {
   grunt: {
-    hp: 30, speed: 60, radius: 13, damage: 10, score: 10,
+    hp: 30, speed: 50, radius: 13, damage: 10, score: 10,
     color: '#ff6a3d', shape: 'triangle', orient: 'aim', unlock: 0, weight: 10,
   },
   darter: {
-    hp: 16, speed: 122, radius: 9, damage: 6, score: 15,
-    color: '#ffd23f', shape: 'diamond', orient: 'aim', unlock: 12, weight: 7,
+    hp: 16, speed: 100, radius: 9, damage: 6, score: 15,
+    color: '#ffd23f', shape: 'diamond', orient: 'aim', unlock: 16, weight: 7,
   },
   tank: {
-    hp: 135, speed: 33, radius: 22, damage: 25, score: 40,
-    color: '#b06cff', shape: 'hex', orient: 'spin', unlock: 26, weight: 4,
+    hp: 135, speed: 28, radius: 22, damage: 25, score: 40,
+    color: '#b06cff', shape: 'hex', orient: 'spin', unlock: 34, weight: 4,
   },
 };
 
@@ -65,12 +96,10 @@ const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 const lerp = (a, b, t) => a + (b - a) * t;
 const rand = (a, b) => a + Math.random() * (b - a);
 
-/** Différence d'angle ramenée dans [-PI, PI]. */
-function angleDelta(a, b) {
-  let d = (a - b) % TAU;
-  if (d > Math.PI) d -= TAU;
-  if (d < -Math.PI) d += TAU;
-  return d;
+/** '#rrggbb' + alpha -> 'rgba(r,g,b,a)'. */
+function hexToRgba(hex, a) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
 }
 
 /* ------------------------------------------------------------------ *
@@ -82,6 +111,8 @@ const ctx = canvas.getContext('2d', { alpha: false });
 const overlay = document.getElementById('overlay');
 const panel = document.getElementById('panel');
 const safeProbe = document.getElementById('safe-probe');
+const weaponBar = document.getElementById('weapons');
+const toast = document.getElementById('toast');
 
 /* Toutes les coordonnées du jeu sont en pixels CSS ; le DPR est absorbé
    par une transformation appliquée une fois pour toutes au resize. */
@@ -162,8 +193,12 @@ const game = {
   combo: 0,             // kills consécutifs sans encaisser
   multiplier: 1,
   hp: CFG.core.hpMax,
+  weapon: 0,            // index dans WEAPONS
+  unlocked: [true],     // un booléen par arme
+  waveTimer: 0,         // compte à rebours de la prochaine impulsion de l'Onde
   enemies: [],
   particles: [],
+  rings: [],            // ondes de choc en cours d'expansion
   spawnTimer: 0,
   shake: 0,
   coreFlash: 0,         // éclat blanc quand le noyau prend un coup
@@ -192,8 +227,12 @@ function resetGame() {
   game.combo = 0;
   game.multiplier = 1;
   game.hp = CFG.core.hpMax;
+  game.weapon = 0;
+  game.unlocked = WEAPONS.map((w) => w.unlock === 0);
+  game.waveTimer = 0;
   game.enemies.length = 0;
   game.particles.length = 0;
+  game.rings.length = 0;
   game.spawnTimer = 0.6;
   game.shake = 0;
   game.coreFlash = 0;
@@ -369,6 +408,14 @@ function updateParticles(dt) {
   }
 }
 
+function updateRings(dt) {
+  for (let i = game.rings.length - 1; i >= 0; i--) {
+    const ring = game.rings[i];
+    ring.life -= dt;
+    if (ring.life <= 0) game.rings.splice(i, 1);
+  }
+}
+
 /* ------------------------------------------------------------------ *
  *  Boucle de mise à jour
  * ------------------------------------------------------------------ */
@@ -390,10 +437,12 @@ function update(dt) {
     }
 
     updateEnemies(dt);
-    if (input.active && input.hasAngle) fireLaser(dt);
+    if (input.active) fireWeapon(dt);
+    checkUnlocks();
   }
 
   updateParticles(dt);
+  updateRings(dt);
 
   game.shake = Math.max(0, game.shake - dt * 42);
   game.coreFlash = Math.max(0, game.coreFlash - dt * 4);
@@ -465,40 +514,103 @@ function endGame() {
   }
 }
 
+function currentWeapon() {
+  return WEAPONS[game.weapon];
+}
+
+function fireWeapon(dt) {
+  const w = currentWeapon();
+  if (w.kind === 'wave') fireWave(w, dt);
+  else if (input.hasAngle) fireBeams(w, dt);
+}
+
 /**
- * Le rayon part du bord du noyau et file jusqu'au bord de l'écran.
- * Il touche tout ennemi dont la distance perpendiculaire à l'axe de tir
- * est inférieure à son rayon + une tolérance qui grandit avec l'éloignement,
- * pour que viser loin ne demande pas une précision au pixel.
+ * Rayons continus. Chaque faisceau part du bord du noyau selon son décalage
+ * angulaire et touche les ennemis dont la distance perpendiculaire à l'axe de
+ * tir est inférieure à leur rayon + une tolérance qui grandit avec
+ * l'éloignement — viser loin ne doit pas demander une précision au pixel.
  */
-function fireLaser(dt) {
-  const ux = Math.cos(input.angle);
-  const uy = Math.sin(input.angle);
-  const damage = CFG.laser.dps * dt;
+function fireBeams(w, dt) {
+  const reach = view.spawnRadius * w.range;
+  const damage = w.dps * dt;
+
+  for (const offset of w.beams) {
+    const angle = input.angle + offset;
+    const ux = Math.cos(angle);
+    const uy = Math.sin(angle);
+
+    let nearest = -1;         // seulement utile aux armes sans perçage
+    let nearestAlong = Infinity;
+
+    for (let i = game.enemies.length - 1; i >= 0; i--) {
+      const e = game.enemies[i];
+      const dx = e.x - view.cx;
+      const dy = e.y - view.cy;
+
+      const along = dx * ux + dy * uy;          // projection sur l'axe de tir
+      if (along <= 0 || along > reach) continue; // derrière le canon, ou hors portée
+
+      const perp = Math.abs(dx * uy - dy * ux);
+      if (perp > e.radius + w.halfWidth + w.slack + along * w.slackPerPx) continue;
+
+      if (w.pierce) {
+        hitEnemy(e, i, damage, ux, uy);
+      } else if (along < nearestAlong) {
+        nearestAlong = along;
+        nearest = i;
+      }
+    }
+
+    if (nearest >= 0) hitEnemy(game.enemies[nearest], nearest, damage, ux, uy);
+  }
+}
+
+/**
+ * L'Onde ne vise pas : elle libère une impulsion circulaire à intervalle fixe
+ * tant que le doigt reste posé, et frappe tout ce qui est à portée du noyau.
+ */
+function fireWave(w, dt) {
+  const radius = view.spawnRadius * w.radiusFactor;
+
+  game.waveTimer -= dt;
+  if (game.waveTimer > 0) return;
+  game.waveTimer += w.interval;
+
+  game.rings.push({ r: view.coreRadius, max: radius, life: 0.45, maxLife: 0.45 });
+  game.shake = Math.max(game.shake, 4);
 
   for (let i = game.enemies.length - 1; i >= 0; i--) {
     const e = game.enemies[i];
-    const dx = e.x - view.cx;
-    const dy = e.y - view.cy;
+    const dist = Math.hypot(e.x - view.cx, e.y - view.cy);
+    if (dist > radius + e.radius) continue;
 
-    const along = dx * ux + dy * uy;      // projection sur l'axe de tir
-    if (along <= 0) continue;             // derrière le canon
+    const ux = (e.x - view.cx) / (dist || 1);
+    const uy = (e.y - view.cy) / (dist || 1);
+    hitEnemy(e, i, w.pulseDamage, ux, uy);
+  }
+}
 
-    const perp = Math.abs(dx * uy - dy * ux);
-    const slack = CFG.laser.halfWidth + CFG.laser.aimSlack
-                + along * CFG.laser.aimSlackPerPx;
-    if (perp > e.radius + slack) continue;
+/** Applique des dégâts à un ennemi ; `ux/uy` oriente les étincelles d'impact. */
+function hitEnemy(enemy, index, damage, ux, uy) {
+  enemy.hp -= damage;
+  enemy.flash = 1;
 
-    e.hp -= damage;
-    e.flash = 1;
+  if (enemy.hp <= 0) {
+    killEnemy(enemy, index);
+  } else if (sparkCooldown <= 0) {
+    // Étincelles limitées dans le temps pour ne pas noyer le rendu.
+    burst(enemy.x - ux * enemy.radius, enemy.y - uy * enemy.radius, '#ffffff', 2, 0.5);
+    sparkCooldown = 0.03;
+  }
+}
 
-    if (e.hp <= 0) {
-      killEnemy(e, i);
-    } else if (sparkCooldown <= 0) {
-      // Étincelles d'impact, limitées dans le temps pour ne pas noyer le rendu.
-      burst(e.x - ux * e.radius, e.y - uy * e.radius, '#ffffff', 2, 0.5);
-      sparkCooldown = 0.03;
-    }
+/** Débloque les armes dont le palier de score vient d'être franchi. */
+function checkUnlocks() {
+  for (let i = 0; i < WEAPONS.length; i++) {
+    if (game.unlocked[i] || game.score < WEAPONS[i].unlock) continue;
+    game.unlocked[i] = true;
+    announceUnlock(WEAPONS[i]);
+    renderWeaponBar();
   }
 }
 
@@ -547,10 +659,11 @@ function render() {
 
   drawStars();
   drawArena();
+  drawRings();
   drawParticles();
 
   if (game.state === STATE.PLAYING || game.state === STATE.PAUSED) {
-    if (input.active && input.hasAngle) drawLaser();
+    drawWeapon();
   }
 
   drawEnemies();
@@ -589,31 +702,67 @@ function drawArena() {
   }
 }
 
-function drawLaser() {
+function drawWeapon() {
+  const w = currentWeapon();
+
+  // L'Onde ne dessine rien en continu : ses impulsions vivent dans game.rings.
+  if (w.kind !== 'beam') return;
+  if (!input.active || !input.hasAngle) return;
+
   const { cx, cy } = view;
-  const ux = Math.cos(input.angle);
-  const uy = Math.sin(input.angle);
-
-  const x1 = cx + ux * (view.coreRadius - 2);
-  const y1 = cy + uy * (view.coreRadius - 2);
-  const len = view.spawnRadius;
-  const x2 = cx + ux * len;
-  const y2 = cy + uy * len;
-
   const flicker = 1 + Math.sin(game.corePulse * 60) * 0.1;
-  glowLine(x1, y1, x2, y2, '#4df3ff', CFG.laser.halfWidth * flicker);
+  const reach = view.spawnRadius * w.range;
 
-  // Éclat de bouche
-  ctx.globalCompositeOperation = 'lighter';
+  for (const offset of w.beams) {
+    const angle = input.angle + offset;
+    const ux = Math.cos(angle);
+    const uy = Math.sin(angle);
+
+    const x1 = cx + ux * (view.coreRadius - 2);
+    const y1 = cy + uy * (view.coreRadius - 2);
+    glowLine(x1, y1, cx + ux * reach, cy + uy * reach, w.color, w.halfWidth * flicker);
+  }
+
+  // Éclat de bouche, une seule fois même pour l'Éventail.
+  const mx = cx + Math.cos(input.angle) * (view.coreRadius - 2);
+  const my = cy + Math.sin(input.angle) * (view.coreRadius - 2);
   const r = 12 * view.scale * flicker;
-  const grad = ctx.createRadialGradient(x1, y1, 0, x1, y1, r);
+
+  ctx.globalCompositeOperation = 'lighter';
+  const grad = ctx.createRadialGradient(mx, my, 0, mx, my, r);
   grad.addColorStop(0, 'rgba(255,255,255,0.9)');
-  grad.addColorStop(0.4, 'rgba(77,243,255,0.5)');
-  grad.addColorStop(1, 'rgba(77,243,255,0)');
+  grad.addColorStop(0.4, hexToRgba(w.color, 0.5));
+  grad.addColorStop(1, hexToRgba(w.color, 0));
   ctx.fillStyle = grad;
   ctx.beginPath();
-  ctx.arc(x1, y1, r, 0, TAU);
+  ctx.arc(mx, my, r, 0, TAU);
   ctx.fill();
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+/** Les impulsions de l'Onde : un anneau qui s'ouvre et s'estompe. */
+function drawRings() {
+  if (!game.rings.length) return;
+  const color = WEAPONS.find((w) => w.kind === 'wave').color;
+
+  ctx.globalCompositeOperation = 'lighter';
+  for (const ring of game.rings) {
+    const t = 1 - ring.life / ring.maxLife;
+    const r = lerp(view.coreRadius, ring.max, t * (2 - t)); // décélère en fin de course
+    const alpha = (1 - t) * 0.9;
+
+    ctx.strokeStyle = hexToRgba(color, alpha * 0.35);
+    ctx.lineWidth = 14;
+    ctx.beginPath();
+    ctx.arc(view.cx, view.cy, r, 0, TAU);
+    ctx.stroke();
+
+    ctx.strokeStyle = hexToRgba(color, alpha);
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(view.cx, view.cy, r, 0, TAU);
+    ctx.stroke();
+  }
   ctx.globalCompositeOperation = 'source-over';
 }
 
@@ -800,19 +949,79 @@ function drawDangerVignette() {
 }
 
 /* ------------------------------------------------------------------ *
+ *  Barre d'armes
+ * ------------------------------------------------------------------ */
+
+/* Pictogrammes : chaque arme se reconnaît à sa silhouette, pas à son nom. */
+const WEAPON_GLYPHS = {
+  ray: '<path d="M11 20V4"/>',
+  fan: '<path d="M11 20V7"/><path d="M4 20 8.5 8"/><path d="M18 20 13.5 8"/>',
+  lance: '<path d="M11 20V9"/><path d="M11 2 7.5 9h7z" fill="currentColor" stroke="none"/>',
+  wave: '<circle cx="11" cy="12" r="2.5" fill="currentColor" stroke="none"/>'
+      + '<path d="M4.5 12a6.5 6.5 0 0 1 13 0"/><path d="M1.5 13.5a9.5 9.5 0 0 1 19 0"/>',
+};
+
+function weaponGlyph(id) {
+  return `<svg class="glyph" width="22" height="22" viewBox="0 0 22 22" aria-hidden="true"
+    fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+    ${WEAPON_GLYPHS[id]}</svg>`;
+}
+
+function renderWeaponBar() {
+  weaponBar.innerHTML = WEAPONS.map((w, i) => {
+    const open = game.unlocked[i];
+    // Une arme verrouillée affiche son palier : elle devient un objectif.
+    const label = open ? w.name : w.unlock;
+    return `<button type="button" class="wpn${i === game.weapon ? ' active' : ''}"
+      data-i="${i}" ${open ? '' : 'disabled'}
+      style="--w:${w.color};--w-dim:${hexToRgba(w.color, 0.25)}"
+      aria-label="${open ? w.name + ' — ' + w.blurb : w.name + ', se débloque à ' + w.unlock + ' points'}"
+      >${weaponGlyph(w.id)}<span>${label}</span></button>`;
+  }).join('');
+}
+
+weaponBar.addEventListener('click', (e) => {
+  const btn = e.target.closest('.wpn');
+  if (!btn || btn.disabled) return;
+
+  const i = Number(btn.dataset.i);
+  if (i === game.weapon) return;
+
+  game.weapon = i;
+  game.waveTimer = 0;   // l'Onde frappe dès qu'on la sélectionne
+  renderWeaponBar();
+  vibrate(12);
+});
+
+function announceUnlock(w) {
+  toast.hidden = false;
+  toast.style.setProperty('--t', w.color);
+  toast.innerHTML = `<span class="t-title">${w.name} débloqué</span>`
+                  + `<span class="t-sub">${w.blurb}</span>`;
+
+  // Redémarre l'animation même si un toast est déjà en cours.
+  toast.classList.remove('show');
+  void toast.offsetWidth;
+  toast.classList.add('show');
+  vibrate([15, 40, 15]);
+}
+
+/* ------------------------------------------------------------------ *
  *  Écrans (overlay HTML)
  * ------------------------------------------------------------------ */
 
 function showMenu() {
   game.state = STATE.MENU;
   overlay.hidden = false;
+  weaponBar.hidden = true;
   panel.className = 'panel';
   panel.innerHTML = `
     <div class="title">VIRGULE</div>
     <div class="subtitle">défends le noyau</div>
     <div class="hint">
       Garde le doigt sur l'écran : le rayon suit ta position.<br>
-      <b>Balaie</b> pour découper tout ce qui approche.
+      <b>Balaie</b> pour découper tout ce qui approche.<br>
+      Les points débloquent de <b>nouvelles armes</b> en cours de partie.
     </div>
     ${game.best > 0 ? `
       <div class="scores">
@@ -828,6 +1037,7 @@ function showMenu() {
 
 function showPause() {
   overlay.hidden = false;
+  weaponBar.hidden = true;
   panel.className = 'panel';
   panel.innerHTML = `
     <div class="title">PAUSE</div>
@@ -836,12 +1046,15 @@ function showPause() {
   `;
   document.getElementById('btn-primary').addEventListener('click', () => {
     overlay.hidden = true;
+    weaponBar.hidden = false;
     game.state = STATE.PLAYING;
   });
 }
 
 function showGameOver() {
   overlay.hidden = false;
+  weaponBar.hidden = true;
+  toast.hidden = true;
   panel.className = 'panel gameover';
   panel.innerHTML = `
     <div class="title" style="font-size:clamp(26px,8vw,48px)">NOYAU PERDU</div>
@@ -856,7 +1069,10 @@ function showGameOver() {
         <div class="value">${game.best}</div>
       </div>
     </div>
-    <div class="stats">${game.kills} ennemis détruits · ${formatTime(game.time)} de survie</div>
+    <div class="stats">
+      ${game.kills} ennemis détruits · ${formatTime(game.time)} de survie<br>
+      ${game.unlocked.filter(Boolean).length} / ${WEAPONS.length} armes débloquées
+    </div>
     <button type="button" id="btn-primary">Rejouer</button>
   `;
   document.getElementById('btn-primary').addEventListener('click', startGame);
@@ -865,6 +1081,10 @@ function showGameOver() {
 function startGame() {
   resetGame();
   overlay.hidden = true;
+  toast.hidden = true;
+  toast.classList.remove('show');
+  weaponBar.hidden = false;
+  renderWeaponBar();
   game.state = STATE.PLAYING;
   input.hasAngle = false;
   input.active = false;

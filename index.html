@@ -54,6 +54,113 @@
     visibility: hidden;
   }
 
+  /* Barre d'armes : en bas, loin du pouce qui vise. La barre elle-même
+     laisse passer les touchers, seuls les boutons les captent. */
+  #weapons {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+    padding: 10px calc(var(--safe-r) + 12px) calc(var(--safe-b) + 12px) calc(var(--safe-l) + 12px);
+    pointer-events: none;
+  }
+  #weapons[hidden] { display: none; }
+
+  .wpn {
+    pointer-events: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    min-width: 66px;
+    padding: 8px 6px 7px;
+    border: 1px solid rgba(232,246,255,.14);
+    border-radius: 13px;
+    background: rgba(8,12,24,.74);
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
+    color: rgba(232,246,255,.62);
+    font: inherit;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    box-shadow: none;
+    touch-action: manipulation;
+    transition: border-color .15s ease, color .15s ease, box-shadow .15s ease;
+  }
+  .wpn svg { display: block; }
+  .wpn .glyph { color: currentColor; }
+  .wpn:active { transform: scale(.95); }
+  .wpn:focus-visible { outline: 2px solid var(--neon); outline-offset: 2px; }
+
+  .wpn.active {
+    color: var(--w);
+    border-color: var(--w);
+    box-shadow: 0 0 18px var(--w-dim), inset 0 0 14px var(--w-dim);
+  }
+
+  .wpn[disabled] {
+    color: rgba(232,246,255,.28);
+    border-style: dashed;
+    border-color: rgba(232,246,255,.12);
+  }
+  .wpn[disabled] .glyph { opacity: .4; }
+
+  /* Annonce de déblocage */
+  #toast {
+    position: fixed;
+    left: 50%;
+    bottom: calc(var(--safe-b) + 92px);
+    transform: translateX(-50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 11px 20px;
+    border: 1px solid var(--t);
+    border-radius: 999px;
+    background: rgba(8,12,24,.9);
+    text-align: center;
+    white-space: nowrap;
+    pointer-events: none;
+    opacity: 0;
+  }
+  #toast[hidden] { display: none; }
+  #toast .t-title {
+    font-size: 13px;
+    font-weight: 800;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--t);
+  }
+  #toast .t-sub {
+    font-size: 11px;
+    color: rgba(232,246,255,.6);
+    letter-spacing: .02em;
+    text-transform: none;
+  }
+  #toast.show { animation: toast 2.6s ease forwards; }
+  @keyframes toast {
+    0%   { opacity: 0; transform: translateX(-50%) translateY(10px) scale(.94); }
+    9%   { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+    78%  { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+    100% { opacity: 0; transform: translateX(-50%) translateY(-6px) scale(1); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    #toast.show { animation-duration: 2.6s; }
+    #toast.show { animation-name: toast-fade; }
+    @keyframes toast-fade {
+      0%, 100% { opacity: 0; transform: translateX(-50%); }
+      9%, 78%  { opacity: 1; transform: translateX(-50%); }
+    }
+    .panel { animation: none; }
+  }
+
   #overlay {
     position: fixed;
     inset: 0;
@@ -158,6 +265,9 @@
 <body>
   <canvas id="game"></canvas>
   <div id="safe-probe"></div>
+
+  <div id="weapons" hidden></div>
+  <div id="toast" hidden></div>
 
   <div id="overlay">
     <div class="panel" id="panel"></div>
