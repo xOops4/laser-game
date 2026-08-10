@@ -28,15 +28,16 @@ const CFG = {
     endInterval: 0.45,     // ... et une fois la difficulté au maximum
     rampTime: 180,         // secondes pour atteindre le maximum
     speedRampTime: 280,    // les ennemis gagnent +100% de vitesse sur cette durée
+    hpRampTime: 260,       // ... et +100% de points de vie sur celle-ci
   },
   particlesMax: 900,
   ringsMax: 40,
 };
 
 /*
- * Armes. La première est disponible d'emblée, les suivantes se débloquent
- * au score indiqué, dans la partie en cours. Chacune a un vrai défaut :
- * le choix doit dépendre de ce qui arrive à l'écran.
+ * Armes. Elles se cumulent : une fois débloquée, une arme tire en même temps
+ * que toutes les précédentes. Les paliers sont donc des montées en puissance,
+ * pas des choix — d'où des dégâts unitaires plus modestes qu'à l'unité.
  *
  *  - beams   : décalages angulaires des rayons, en radians
  *  - dps     : dégâts par seconde et par rayon
@@ -53,22 +54,60 @@ const WEAPONS = [
   },
   {
     id: 'fan', name: 'Éventail', unlock: 350, color: '#5dffa0',
-    kind: 'beam', beams: [-0.34, 0, 0.34], dps: 58, range: 0.5, pierce: true,
+    kind: 'beam', beams: [-0.36, 0.36], dps: 42, range: 0.52, pierce: true,
     halfWidth: 4, slack: 5, slackPerPx: 0.03,
-    blurb: 'Trois rayons courts. Nettoie les nuées, impuissant au loin.',
+    blurb: 'Deux rayons de flanc. Élargit la coupe, ne porte pas loin.',
   },
   {
     id: 'lance', name: 'Lance', unlock: 950, color: '#ff3d81',
-    kind: 'beam', beams: [0], dps: 340, range: 1, pierce: false,
+    kind: 'beam', beams: [0], dps: 235, range: 1, pierce: false,
     halfWidth: 3, slack: 1, slackPerPx: 0.007,
-    blurb: 'Une seule cible, dégâts énormes. Visée exigeante.',
+    blurb: 'Concentre le tir sur la cible la plus proche. Perce les blindés.',
   },
   {
-    id: 'wave', name: 'Onde', unlock: 2100, color: '#c9a3ff',
-    kind: 'wave', interval: 1.05, pulseDamage: 52, radiusFactor: 0.42,
-    blurb: 'Impulsions circulaires. Ignore la visée, ne porte pas loin.',
+    id: 'orbit', name: 'Orbiteurs', unlock: 2100, color: '#c9a3ff',
+    kind: 'orbit', count: 3, dps: 62, range: 0.4, spin: 0.85, orbit: 2.2,
+    blurb: 'Trois satellites qui tirent tout seuls, même doigt levé.',
   },
 ];
+
+/*
+ * Bonus lâchés par les ennemis. On les ramasse en passant un rayon dessus.
+ * `duration` à 0 = effet immédiat.
+ */
+const BONUSES = {
+  beams: {
+    name: 'Faisceaux', color: '#7cf7ff', duration: 12,
+    blurb: 'Deux rayons de plus sur chaque arme',
+  },
+  power: {
+    name: 'Surcharge', color: '#ff9f1c', duration: 10,
+    blurb: 'Dégâts doublés',
+  },
+  slow: {
+    name: 'Ralenti', color: '#9fd8ff', duration: 8,
+    blurb: 'Ennemis au ralenti',
+  },
+  arsenal: {
+    name: 'Arsenal', color: '#ffffff', duration: 10,
+    blurb: 'Toutes les armes, même verrouillées',
+  },
+  repair: {
+    name: 'Réparation', color: '#5dffa0', duration: 0,
+    blurb: 'Noyau réparé',
+  },
+};
+
+const BONUS_IDS = Object.keys(BONUSES);
+
+const DROP = {
+  chance: 0.05,        // probabilité de lâcher un bonus, par ennemi tué
+  tankChance: 0.16,    // les gros sont plus généreux
+  life: 9,             // secondes avant disparition
+  radius: 13,
+  grabSlack: 12,       // marge de ramassage au-delà du rayon du bonus
+  repairAmount: 35,
+};
 
 /* Types d'ennemis. `unlock` = secondes avant qu'il puisse apparaître. */
 const ENEMY_TYPES = {
@@ -208,10 +247,12 @@ const game = {
   combo: 0,             // kills consécutifs sans encaisser
   multiplier: 1,
   hp: CFG.core.hpMax,
-  weapon: 0,            // index dans WEAPONS
-  unlocked: [true],     // un booléen par arme
-  waveTimer: 0,         // compte à rebours de la prochaine impulsion de l'Onde
+  unlocked: [true],     // un booléen par arme ; les armes se cumulent
+  buffs: {},            // id de bonus -> secondes restantes
+  orbitAngle: 0,        // phase de rotation des satellites
+  orbitShots: [],       // tirs des satellites, recalculés à chaque image
   enemies: [],
+  pickups: [],
   particles: [],
   rings: [],            // ondes de choc en cours d'expansion
   spawnTimer: 0,
@@ -242,10 +283,12 @@ function resetGame() {
   game.combo = 0;
   game.multiplier = 1;
   game.hp = CFG.core.hpMax;
-  game.weapon = 0;
   game.unlocked = WEAPONS.map((w) => w.unlock === 0);
-  game.waveTimer = 0;
+  game.buffs = {};
+  game.orbitAngle = 0;
+  game.orbitShots.length = 0;
   game.enemies.length = 0;
+  game.pickups.length = 0;
   game.particles.length = 0;
   game.rings.length = 0;
   game.spawnTimer = 0.6;
@@ -432,8 +475,8 @@ const HUM = {
 
 function humStart() {
   if (!audioReady() || audio.hum) return;
-  const spec = HUM[currentWeapon().id];
-  if (!spec) return;                       // l'Onde n'a pas de tir continu
+  const spec = HUM[leadWeapon().id];       // l'arme de plus haut palier donne le ton
+  if (!spec) return;
 
   const t = audio.ctx.currentTime;
   const filter = audio.ctx.createBiquadFilter();
@@ -484,7 +527,7 @@ function sfxHit() {
 function sfxKill(enemy) {
   if (game.corePulse - audio.lastKill < 0.035) return;
   audio.lastKill = game.corePulse;
-  const big = enemy.hpMax > 60;
+  const big = enemy.def.hp > 60;
   noiseBurst(big ? 0.34 : 0.16, {
     type: 'lowpass', freq: big ? 1500 : 2400, freqTo: big ? 120 : 320,
     gain: big ? 0.3 : 0.16,
@@ -500,9 +543,14 @@ function sfxCoreHit(enemy) {
   if (enemy.def.damage >= 20) tone(70, 0.45, { to: 30, type: 'sine', gain: 0.3 });
 }
 
-function sfxWave() {
-  noiseBurst(0.42, { type: 'lowpass', freq: 700, freqTo: 90, gain: 0.24 });
-  tone(180, 0.36, { to: 60, type: 'sine', gain: 0.24 });
+function sfxPickup() {
+  [660, 880, 1320].forEach((f, i) => {
+    tone(f, 0.14, { type: 'triangle', gain: 0.16, delay: i * 0.055 });
+  });
+}
+
+function sfxBuffEnd() {
+  tone(420, 0.18, { to: 210, type: 'sine', gain: 0.09 });
 }
 
 function sfxCombo(mult) {
@@ -582,13 +630,16 @@ function spawnEnemy() {
   const def = pickEnemyType();
   const angle = Math.random() * TAU;
   const speedMul = 1 + game.time / CFG.spawn.speedRampTime;
+  // Les armes se cumulant, les ennemis s'endurcissent pour que la fin de
+  // partie garde du mordant. +100 % de PV au bout de trois minutes.
+  const hp = def.hp * (1 + game.time / CFG.spawn.hpRampTime);
 
   game.enemies.push({
     def,
     x: view.cx + Math.cos(angle) * view.spawnRadius,
     y: view.cy + Math.sin(angle) * view.spawnRadius,
-    hp: def.hp,
-    hpMax: def.hp,
+    hp,
+    hpMax: hp,
     speed: def.speed * speedMul * rand(0.9, 1.12),
     radius: def.radius,
     rot: angle + Math.PI,
@@ -612,7 +663,7 @@ function killEnemy(enemy, index) {
   );
   game.score += enemy.def.score * game.multiplier;
 
-  const big = enemy.hpMax > 60;
+  const big = enemy.def.hp > 60;
   const size = enemy.radius;
 
   shards(enemy.x, enemy.y, enemy.def.color, Math.round(9 + size * 0.8), big ? 1.35 : 1);
@@ -622,6 +673,7 @@ function killEnemy(enemy, index) {
 
   if (big) game.shake = Math.max(game.shake, 6);
   sfxKill(enemy);
+  maybeDropBonus(enemy);
 
   // Palier de combo franchi : anneau doré et petit carillon.
   if (game.multiplier > before) {
@@ -742,8 +794,11 @@ function update(dt) {
       game.spawnTimer += interval * rand(0.75, 1.25);
     }
 
+    game.orbitAngle += dt * WEAPONS.find((w) => w.kind === 'orbit').spin;
     updateEnemies(dt);
-    if (input.active) fireWeapon(dt);
+    fireAll(dt);
+    updatePickups(dt);
+    updateBuffs(dt);
     checkUnlocks();
   }
 
@@ -764,6 +819,7 @@ function update(dt) {
 function updateEnemies(dt) {
   const contactBase = view.coreRadius;
   const trails = game.enemies.length <= 45;
+  const speedMul = game.buffs.slow > 0 ? 0.42 : 1;
 
   for (let i = game.enemies.length - 1; i >= 0; i--) {
     const e = game.enemies[i];
@@ -772,8 +828,8 @@ function updateEnemies(dt) {
     const dy = view.cy - e.y;
     const dist = Math.hypot(dx, dy) || 1;
 
-    e.x += (dx / dist) * e.speed * dt;
-    e.y += (dy / dist) * e.speed * dt;
+    e.x += (dx / dist) * e.speed * speedMul * dt;
+    e.y += (dy / dist) * e.speed * speedMul * dt;
     e.flash = Math.max(0, e.flash - dt * 12);
 
     // Traînée de réacteur. Coupée quand l'écran se remplit, pour tenir le budget.
@@ -850,14 +906,40 @@ function endGame() {
   }
 }
 
-function currentWeapon() {
-  return WEAPONS[game.weapon];
+/** Une arme tire si elle est débloquée, ou si le bonus Arsenal est actif. */
+function isArmed(i) {
+  return game.unlocked[i] || game.buffs.arsenal > 0;
 }
 
-function fireWeapon(dt) {
-  const w = currentWeapon();
-  if (w.kind === 'wave') fireWave(w, dt);
-  else if (input.hasAngle) fireBeams(w, dt);
+/** L'arme de plus haut palier en service : elle donne le timbre du tir. */
+function leadWeapon() {
+  for (let i = WEAPONS.length - 1; i >= 0; i--) {
+    if (WEAPONS[i].kind === 'beam' && isArmed(i)) return WEAPONS[i];
+  }
+  return WEAPONS[0];
+}
+
+/** Le bonus Faisceaux greffe deux rayons de flanc sur chaque arme. */
+function beamOffsets(w) {
+  return game.buffs.beams > 0 ? w.beams.concat([-0.68, 0.68]) : w.beams;
+}
+
+function damageMultiplier() {
+  return game.buffs.power > 0 ? 2 : 1;
+}
+
+/** Toutes les armes en service tirent ensemble. */
+function fireAll(dt) {
+  game.orbitShots.length = 0;
+
+  for (let i = 0; i < WEAPONS.length; i++) {
+    if (!isArmed(i)) continue;
+    const w = WEAPONS[i];
+
+    // Les satellites se battent seuls ; les rayons attendent le doigt.
+    if (w.kind === 'orbit') fireOrbiters(w, dt);
+    else if (input.active && input.hasAngle) fireBeams(w, dt);
+  }
 }
 
 /**
@@ -868,9 +950,9 @@ function fireWeapon(dt) {
  */
 function fireBeams(w, dt) {
   const reach = view.spawnRadius * w.range;
-  const damage = w.dps * dt;
+  const damage = w.dps * dt * damageMultiplier();
 
-  for (const offset of w.beams) {
+  for (const offset of beamOffsets(w)) {
     const angle = input.angle + offset;
     const ux = Math.cos(angle);
     const uy = Math.sin(angle);
@@ -902,41 +984,35 @@ function fireBeams(w, dt) {
 }
 
 /**
- * L'Onde ne vise pas : elle libère une impulsion circulaire à intervalle fixe
- * tant que le doigt reste posé, et frappe tout ce qui est à portée du noyau.
+ * Les satellites tournent autour du noyau et tirent en continu sur l'ennemi
+ * le plus proche à leur portée — y compris quand le joueur ne touche rien.
+ * Chacun ne tient qu'une cible, ce qui les rend complémentaires du balayage.
  */
-function fireWave(w, dt) {
-  const radius = view.spawnRadius * w.radiusFactor;
+function fireOrbiters(w, dt) {
+  const reach = view.spawnRadius * w.range;
+  const damage = w.dps * dt * damageMultiplier();
+  const orbitR = view.coreRadius * w.orbit;
 
-  game.waveTimer -= dt;
-  if (game.waveTimer > 0) return;
-  game.waveTimer += w.interval;
+  for (let s = 0; s < w.count; s++) {
+    const a = game.orbitAngle + (s / w.count) * TAU;
+    const sx = view.cx + Math.cos(a) * orbitR;
+    const sy = view.cy + Math.sin(a) * orbitR;
 
-  shockRing(w.color, radius, 0.45, 4);
-  game.shake = Math.max(game.shake, 5);
-  sfxWave();
+    let target = -1;
+    let bestDist = reach;
+    for (let i = 0; i < game.enemies.length; i++) {
+      const e = game.enemies[i];
+      const d = Math.hypot(e.x - sx, e.y - sy);
+      if (d < bestDist) { bestDist = d; target = i; }
+    }
+    if (target < 0) continue;
 
-  // Poussière soulevée le long du front de l'onde.
-  for (let i = 0; i < 22; i++) {
-    const a = Math.random() * TAU;
-    const v = rand(160, 320);
-    addParticle({
-      x: view.cx + Math.cos(a) * view.coreRadius,
-      y: view.cy + Math.sin(a) * view.coreRadius,
-      vx: Math.cos(a) * v, vy: Math.sin(a) * v,
-      life: rand(0.25, 0.45), maxLife: 0.45,
-      size: rand(1, 2.4), drag: 0.93, shape: 'streak', color: w.color,
-    });
-  }
+    const e = game.enemies[target];
+    game.orbitShots.push({ x1: sx, y1: sy, x2: e.x, y2: e.y, color: w.color });
 
-  for (let i = game.enemies.length - 1; i >= 0; i--) {
-    const e = game.enemies[i];
-    const dist = Math.hypot(e.x - view.cx, e.y - view.cy);
-    if (dist > radius + e.radius) continue;
-
-    const ux = (e.x - view.cx) / (dist || 1);
-    const uy = (e.y - view.cy) / (dist || 1);
-    hitEnemy(e, i, w.pulseDamage, ux, uy);
+    const ux = (e.x - sx) / (bestDist || 1);
+    const uy = (e.y - sy) / (bestDist || 1);
+    hitEnemy(e, target, damage, ux, uy);
   }
 }
 
@@ -966,6 +1042,100 @@ function hitEnemy(enemy, index, damage, ux, uy) {
       size: rand(1, 2.4), drag: 0.9, shape: 'streak',
       color: i === 0 ? '#ffffff' : enemy.def.color,
     });
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ *  Bonus
+ * ------------------------------------------------------------------ */
+
+function maybeDropBonus(enemy) {
+  const chance = enemy.def.hp > 60 ? DROP.tankChance : DROP.chance;
+  if (Math.random() > chance) return;
+
+  const id = BONUS_IDS[Math.floor(Math.random() * BONUS_IDS.length)];
+  // La Réparation ne tombe que si elle sert à quelque chose.
+  if (id === 'repair' && game.hp > CFG.core.hpMax * 0.85) return;
+
+  const a = Math.random() * TAU;
+  game.pickups.push({
+    id, x: enemy.x, y: enemy.y,
+    vx: Math.cos(a) * 34, vy: Math.sin(a) * 34,
+    life: DROP.life, spin: 0,
+  });
+}
+
+function updatePickups(dt) {
+  for (let i = game.pickups.length - 1; i >= 0; i--) {
+    const p = game.pickups[i];
+    p.life -= dt;
+    if (p.life <= 0) { game.pickups.splice(i, 1); continue; }
+
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vx *= 0.965;
+    p.vy *= 0.965;
+    p.spin += dt * 1.7;
+
+    // Ramassage : un rayon qui passe dessus, ou le noyau qu'il effleure.
+    if (beamTouches(p.x, p.y, DROP.radius + DROP.grabSlack)
+        || Math.hypot(p.x - view.cx, p.y - view.cy) < view.coreRadius + DROP.radius) {
+      game.pickups.splice(i, 1);
+      collectBonus(p);
+    }
+  }
+}
+
+/** Un rayon en service passe-t-il à moins de `slack` du point donné ? */
+function beamTouches(x, y, slack) {
+  if (!input.active || !input.hasAngle) return false;
+
+  const dx = x - view.cx;
+  const dy = y - view.cy;
+
+  for (let i = 0; i < WEAPONS.length; i++) {
+    if (!isArmed(i)) continue;
+    const w = WEAPONS[i];
+    if (w.kind !== 'beam') continue;
+
+    const reach = view.spawnRadius * w.range;
+    for (const offset of beamOffsets(w)) {
+      const a = input.angle + offset;
+      const ux = Math.cos(a);
+      const uy = Math.sin(a);
+      const along = dx * ux + dy * uy;
+      if (along <= 0 || along > reach) continue;
+      if (Math.abs(dx * uy - dy * ux) <= slack) return true;
+    }
+  }
+  return false;
+}
+
+function collectBonus(pickup) {
+  const def = BONUSES[pickup.id];
+
+  if (pickup.id === 'repair') {
+    game.hp = Math.min(CFG.core.hpMax, game.hp + DROP.repairAmount);
+  } else {
+    // Ramasser deux fois le même bonus prolonge, sans cumuler l'effet.
+    game.buffs[pickup.id] = (game.buffs[pickup.id] || 0) + def.duration;
+  }
+
+  shockRingAt(pickup.x, pickup.y, def.color, 90, 0.45, 3);
+  burst(pickup.x, pickup.y, def.color, 26, 1.3);
+  shards(pickup.x, pickup.y, '#ffffff', 10, 1);
+  showBanner(def.name, def.blurb, def.color);
+  vibrate([10, 25, 10]);
+  sfxPickup();
+}
+
+function updateBuffs(dt) {
+  for (const id in game.buffs) {
+    game.buffs[id] -= dt;
+    if (game.buffs[id] <= 0) {
+      delete game.buffs[id];
+      sfxBuffEnd();
+    }
   }
 }
 
@@ -1031,6 +1201,7 @@ function render() {
     drawWeapon();
   }
 
+  drawPickups();
   drawEnemies();
 
   if (game.hp > 0) drawCore();
@@ -1075,42 +1246,122 @@ function drawArena() {
   }
 }
 
+/** Tous les rayons en service, plus les tirs des satellites. */
 function drawWeapon() {
-  const w = currentWeapon();
-
-  // L'Onde ne dessine rien en continu : ses impulsions vivent dans game.rings.
-  if (w.kind !== 'beam') return;
-  if (!input.active || !input.hasAngle) return;
-
   const { cx, cy } = view;
   const flicker = 1 + Math.sin(game.corePulse * 60) * 0.1;
-  const reach = view.spawnRadius * w.range;
+  const firing = input.active && input.hasAngle;
 
-  for (const offset of w.beams) {
-    const angle = input.angle + offset;
-    const ux = Math.cos(angle);
-    const uy = Math.sin(angle);
+  if (firing) {
+    for (let i = 0; i < WEAPONS.length; i++) {
+      if (!isArmed(i)) continue;
+      const w = WEAPONS[i];
+      if (w.kind !== 'beam') continue;
 
-    const x1 = cx + ux * (view.coreRadius - 2);
-    const y1 = cy + uy * (view.coreRadius - 2);
-    glowLine(x1, y1, cx + ux * reach, cy + uy * reach, w.color, w.halfWidth * flicker);
+      const reach = view.spawnRadius * w.range;
+      for (const offset of beamOffsets(w)) {
+        const angle = input.angle + offset;
+        const ux = Math.cos(angle);
+        const uy = Math.sin(angle);
+        glowLine(
+          cx + ux * (view.coreRadius - 2), cy + uy * (view.coreRadius - 2),
+          cx + ux * reach, cy + uy * reach,
+          w.color, w.halfWidth * flicker
+        );
+      }
+    }
+
+    // Éclat de bouche, une seule fois pour toute la salve.
+    const lead = leadWeapon();
+    const mx = cx + Math.cos(input.angle) * (view.coreRadius - 2);
+    const my = cy + Math.sin(input.angle) * (view.coreRadius - 2);
+    const r = 14 * view.scale * flicker;
+
+    ctx.globalCompositeOperation = 'lighter';
+    const grad = ctx.createRadialGradient(mx, my, 0, mx, my, r);
+    grad.addColorStop(0, 'rgba(255,255,255,0.9)');
+    grad.addColorStop(0.4, hexToRgba(lead.color, 0.5));
+    grad.addColorStop(1, hexToRgba(lead.color, 0));
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(mx, my, r, 0, TAU);
+    ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
   }
 
-  // Éclat de bouche, une seule fois même pour l'Éventail.
-  const mx = cx + Math.cos(input.angle) * (view.coreRadius - 2);
-  const my = cy + Math.sin(input.angle) * (view.coreRadius - 2);
-  const r = 12 * view.scale * flicker;
+  drawOrbiters();
+}
+
+function drawOrbiters() {
+  const idx = WEAPONS.findIndex((w) => w.kind === 'orbit');
+  if (!isArmed(idx)) return;
+
+  const w = WEAPONS[idx];
+  const orbitR = view.coreRadius * w.orbit;
+
+  // Traits vers les cibles, calculés pendant le tir.
+  for (const shot of game.orbitShots) {
+    glowLine(shot.x1, shot.y1, shot.x2, shot.y2, shot.color, 2);
+  }
 
   ctx.globalCompositeOperation = 'lighter';
-  const grad = ctx.createRadialGradient(mx, my, 0, mx, my, r);
-  grad.addColorStop(0, 'rgba(255,255,255,0.9)');
-  grad.addColorStop(0.4, hexToRgba(w.color, 0.5));
-  grad.addColorStop(1, hexToRgba(w.color, 0));
-  ctx.fillStyle = grad;
-  ctx.beginPath();
-  ctx.arc(mx, my, r, 0, TAU);
-  ctx.fill();
+  for (let s = 0; s < w.count; s++) {
+    const a = game.orbitAngle + (s / w.count) * TAU;
+    const x = view.cx + Math.cos(a) * orbitR;
+    const y = view.cy + Math.sin(a) * orbitR;
+    const r = 5.5 * view.scale;
+
+    const grad = ctx.createRadialGradient(x, y, 0, x, y, r * 2.4);
+    grad.addColorStop(0, 'rgba(255,255,255,0.95)');
+    grad.addColorStop(0.35, hexToRgba(w.color, 0.75));
+    grad.addColorStop(1, hexToRgba(w.color, 0));
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(x, y, r * 2.4, 0, TAU);
+    ctx.fill();
+  }
   ctx.globalCompositeOperation = 'source-over';
+}
+
+/** Bonus au sol : un losange qui tourne, cerclé, clignotant en fin de vie. */
+function drawPickups() {
+  for (const p of game.pickups) {
+    const def = BONUSES[p.id];
+    // Les deux dernières secondes, il clignote : à ramasser maintenant.
+    if (p.life < 2 && Math.sin(p.life * 22) < -0.2) continue;
+
+    const pulse = 1 + Math.sin(game.corePulse * 5 + p.spin) * 0.08;
+    const r = DROP.radius * pulse;
+
+    ctx.globalCompositeOperation = 'lighter';
+    const halo = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r * 2.6);
+    halo.addColorStop(0, hexToRgba(def.color, 0.5));
+    halo.addColorStop(1, hexToRgba(def.color, 0));
+    ctx.fillStyle = halo;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r * 2.6, 0, TAU);
+    ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(p.spin);
+    ctx.beginPath();
+    ctx.moveTo(0, -r); ctx.lineTo(r, 0); ctx.lineTo(0, r); ctx.lineTo(-r, 0);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(6,8,18,0.8)';
+    ctx.fill();
+    ctx.strokeStyle = def.color;
+    ctx.lineWidth = 2.2;
+    ctx.stroke();
+    ctx.restore();
+
+    // Point central : rappel de la couleur, lisible même en petit.
+    ctx.fillStyle = def.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 2.6, 0, TAU);
+    ctx.fill();
+  }
 }
 
 /** Anneaux de choc : impulsions de l'Onde, morts, paliers de combo, impacts. */
@@ -1169,7 +1420,7 @@ function drawEnemies() {
     ctx.restore();
 
     // Jauge de vie, seulement pour les gros qui demandent plusieurs passages.
-    if (e.hpMax > 60 && e.hp < e.hpMax) {
+    if (e.def.hp > 60 && e.hp < e.hpMax) {
       const frac = e.hp / e.hpMax;
       ctx.strokeStyle = e.def.color;
       ctx.globalAlpha = 0.85;
@@ -1306,11 +1557,44 @@ function drawHud() {
     ctx.fillText(`×${game.multiplier}`, padX, padY + Math.round(32 * s));
   }
 
+  drawBuffChips(padX, padY + Math.round((game.multiplier > 1 ? 56 : 36) * s), s);
+
   // Chrono, centré : le coin droit appartient au coupe-son.
   ctx.textAlign = 'center';
   ctx.fillStyle = 'rgba(232,246,255,0.55)';
   ctx.font = `600 ${Math.round(15 * s)}px ui-sans-serif, system-ui, sans-serif`;
   ctx.fillText(formatTime(game.time), view.w / 2, padY + 6);
+}
+
+/** Effets en cours, avec leur temps restant sous forme de barre qui fond. */
+function drawBuffChips(x, y, s) {
+  const h = Math.round(15 * s);
+  const gap = Math.round(5 * s);
+  let row = 0;
+
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.font = `700 ${Math.round(9.5 * s)}px ui-sans-serif, system-ui, sans-serif`;
+
+  for (const id in game.buffs) {
+    const def = BONUSES[id];
+    const frac = clamp(game.buffs[id] / def.duration, 0, 1);
+    const top = y + row * (h + gap);
+    const label = def.name.toUpperCase();
+    const wpx = Math.max(ctx.measureText(label).width + 16 * s, 58 * s);
+
+    ctx.fillStyle = hexToRgba(def.color, 0.14);
+    ctx.fillRect(x, top, wpx, h);
+    ctx.fillStyle = hexToRgba(def.color, 0.32);
+    ctx.fillRect(x, top, wpx * frac, h);   // la barre se vide avec le temps
+
+    ctx.fillStyle = def.color;
+    ctx.fillRect(x, top, 2, h);
+    ctx.fillText(label, x + 7 * s, top + h / 2 + 0.5);
+    row++;
+  }
+
+  ctx.textBaseline = 'top';
 }
 
 function formatTime(t) {
@@ -1342,10 +1626,12 @@ function drawDangerVignette() {
 /* Pictogrammes : chaque arme se reconnaît à sa silhouette, pas à son nom. */
 const WEAPON_GLYPHS = {
   ray: '<path d="M11 20V4"/>',
-  fan: '<path d="M11 20V7"/><path d="M4 20 8.5 8"/><path d="M18 20 13.5 8"/>',
+  fan: '<path d="M4.5 20 8.5 6"/><path d="M17.5 20 13.5 6"/>',
   lance: '<path d="M11 20V9"/><path d="M11 2 7.5 9h7z" fill="currentColor" stroke="none"/>',
-  wave: '<circle cx="11" cy="12" r="2.5" fill="currentColor" stroke="none"/>'
-      + '<path d="M4.5 12a6.5 6.5 0 0 1 13 0"/><path d="M1.5 13.5a9.5 9.5 0 0 1 19 0"/>',
+  orbit: '<circle cx="11" cy="11" r="3" fill="currentColor" stroke="none"/>'
+       + '<ellipse cx="11" cy="11" rx="9" ry="4.2"/>'
+       + '<circle cx="20" cy="11" r="1.7" fill="currentColor" stroke="none"/>'
+       + '<circle cx="2" cy="11" r="1.7" fill="currentColor" stroke="none"/>',
 };
 
 function weaponGlyph(id) {
@@ -1354,33 +1640,20 @@ function weaponGlyph(id) {
     ${WEAPON_GLYPHS[id]}</svg>`;
 }
 
+/*
+ * Les armes se cumulant, la barre n'est plus un sélecteur mais l'état de
+ * l'arsenal : ce qui tire s'allume, le reste affiche le score à atteindre.
+ */
 function renderWeaponBar() {
   weaponBar.innerHTML = WEAPONS.map((w, i) => {
     const open = game.unlocked[i];
-    // Une arme verrouillée affiche son palier : elle devient un objectif.
     const label = open ? w.name : w.unlock;
-    return `<button type="button" class="wpn${i === game.weapon ? ' active' : ''}"
-      data-i="${i}" ${open ? '' : 'disabled'}
+    return `<div class="wpn${open ? ' active' : ''}"
       style="--w:${w.color};--w-dim:${hexToRgba(w.color, 0.25)}"
-      aria-label="${open ? w.name + ' — ' + w.blurb : w.name + ', se débloque à ' + w.unlock + ' points'}"
-      >${weaponGlyph(w.id)}<span>${label}</span></button>`;
+      title="${open ? w.blurb : 'Se débloque à ' + w.unlock + ' points'}"
+      >${weaponGlyph(w.id)}<span>${label}</span></div>`;
   }).join('');
 }
-
-weaponBar.addEventListener('click', (e) => {
-  const btn = e.target.closest('.wpn');
-  if (!btn || btn.disabled) return;
-
-  const i = Number(btn.dataset.i);
-  if (i === game.weapon) return;
-
-  game.weapon = i;
-  game.waveTimer = 0;   // l'Onde frappe dès qu'on la sélectionne
-  renderWeaponBar();
-  vibrate(12);
-  audioInit();
-  sfxSwitch();
-});
 
 function renderSoundButton() {
   const waves = audio.on
@@ -1402,17 +1675,21 @@ soundBtn.addEventListener('click', () => {
   if (audio.on) sfxSwitch();
 });
 
-function announceUnlock(w) {
+/** Bandeau d'annonce, partagé par les déblocages d'armes et les bonus. */
+function showBanner(title, sub, color) {
   toast.hidden = false;
-  toast.style.setProperty('--t', w.color);
-  toast.innerHTML = `<span class="t-title">${w.name} débloqué</span>`
-                  + `<span class="t-sub">${w.blurb}</span>`;
+  toast.style.setProperty('--t', color);
+  toast.innerHTML = `<span class="t-title">${title}</span>`
+                  + `<span class="t-sub">${sub}</span>`;
 
-  // Redémarre l'animation même si un toast est déjà en cours.
+  // Redémarre l'animation même si un bandeau est déjà en cours.
   toast.classList.remove('show');
   void toast.offsetWidth;
   toast.classList.add('show');
+}
 
+function announceUnlock(w) {
+  showBanner(`${w.name} débloqué`, w.blurb, w.color);
   shockRing(w.color, view.spawnRadius * 0.55, 0.8, 3);
   burst(view.cx, view.cy, w.color, 40, 1.6);
   vibrate([15, 40, 15]);
@@ -1434,7 +1711,8 @@ function showMenu() {
     <div class="hint">
       Garde le doigt sur l'écran : le rayon suit ta position.<br>
       <b>Balaie</b> pour découper tout ce qui approche.<br>
-      Les points débloquent de <b>nouvelles armes</b> en cours de partie.
+      Les points débloquent des <b>armes qui se cumulent</b>, et les ennemis
+      lâchent des <b>bonus</b> à ramasser d'un coup de rayon.
     </div>
     ${game.best > 0 ? `
       <div class="scores">

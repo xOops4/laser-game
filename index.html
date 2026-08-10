@@ -91,8 +91,10 @@
   }
   #weapons[hidden] { display: none; }
 
+  /* Purement indicatif depuis que les armes se cumulent : rien n'intercepte
+     le toucher, la bande basse reste jouable. */
   .wpn {
-    pointer-events: auto;
+    pointer-events: none;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -116,21 +118,21 @@
   }
   .wpn svg { display: block; }
   .wpn .glyph { color: currentColor; }
-  .wpn:active { transform: scale(.95); }
-  .wpn:focus-visible { outline: 2px solid var(--neon); outline-offset: 2px; }
 
+  /* Une arme en service s'allume à sa couleur ; les autres restent en
+     pointillés avec le score qui les débloquera. */
   .wpn.active {
     color: var(--w);
     border-color: var(--w);
     box-shadow: 0 0 18px var(--w-dim), inset 0 0 14px var(--w-dim);
   }
 
-  .wpn[disabled] {
+  .wpn:not(.active) {
     color: rgba(232,246,255,.28);
     border-style: dashed;
     border-color: rgba(232,246,255,.12);
   }
-  .wpn[disabled] .glyph { opacity: .4; }
+  .wpn:not(.active) .glyph { opacity: .4; }
 
   /* Annonce de déblocage */
   #toast {
