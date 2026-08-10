@@ -1341,6 +1341,12 @@ function update(dt) {
     updateBuffs(dt);
     updateCombo(dt);
     checkUnlocks();
+
+    progressTimer -= dt;
+    if (progressTimer <= 0) {
+      progressTimer = 0.25;
+      updateWeaponProgress();
+    }
   }
 
   updateChainArcs(dt);
@@ -2541,12 +2547,33 @@ function weaponGlyph(id) {
 function renderWeaponBar() {
   weaponBar.innerHTML = WEAPONS.map((w, i) => {
     const open = game.unlocked[i];
-    const label = open ? w.name : w.unlock;
-    return `<div class="wpn${open ? ' active' : ''}"
+    const label = open
+      ? `${w.name} — ${w.blurb}`
+      : `${w.name}, se débloque à ${w.unlock} points`;
+    return `<div class="wpn${open ? ' active' : ''}" data-i="${i}"
       style="--w:${w.color};--w-dim:${hexToRgba(w.color, 0.25)}"
-      title="${open ? w.blurb : 'Se débloque à ' + w.unlock + ' points'}"
-      >${weaponGlyph(w.id)}<span>${label}</span></div>`;
+      role="img" aria-label="${label}" title="${label}"
+      >${weaponGlyph(w.id)}</div>`;
   }).join('');
+  updateWeaponProgress();
+}
+
+/*
+ * Remplissage des pastilles verrouillées. Le score change à chaque kill mais
+ * toucher le DOM à chaque image serait du gaspillage : on rafraîchit à 4 Hz,
+ * la transition CSS lisse le reste.
+ */
+let progressTimer = 0;
+
+function updateWeaponProgress() {
+  const chips = weaponBar.children;
+  for (let i = 0; i < chips.length; i++) {
+    if (game.unlocked[i]) continue;
+    const from = i > 0 ? WEAPONS[i - 1].unlock : 0;
+    const span = WEAPONS[i].unlock - from;
+    const p = clamp((game.score - from) / (span || 1), 0, 1);
+    chips[i].style.setProperty('--p', p.toFixed(3));
+  }
 }
 
 /* ------------------------------------------------------------------ *

@@ -98,48 +98,50 @@
      le toucher, la bande basse reste jouable. */
   .wpn {
     pointer-events: none;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 2px;
-    /* Six armes doivent tenir sur une ligne de 390 px : les pastilles se
-       serrent au lieu de déborder. */
-    flex: 0 1 auto;
-    min-width: 0;
-    padding: 6px 5px 5px;
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 42px;
+    height: 42px;
+    flex: 0 0 auto;
     border: 1px solid rgba(232,246,255,.14);
-    border-radius: 11px;
+    border-radius: 12px;
     background: rgba(8,12,24,.74);
     -webkit-backdrop-filter: blur(6px);
     backdrop-filter: blur(6px);
     color: rgba(232,246,255,.62);
-    font: inherit;
-    font-size: 8.5px;
-    font-weight: 700;
-    letter-spacing: .04em;
-    text-transform: uppercase;
-    white-space: nowrap;
+    overflow: hidden;
     box-shadow: none;
-    touch-action: manipulation;
-    transition: border-color .15s ease, color .15s ease, box-shadow .15s ease;
+    transition: border-color .2s ease, color .2s ease, box-shadow .2s ease;
   }
-  .wpn svg { display: block; }
+  .wpn svg { display: block; position: relative; z-index: 1; }
   .wpn .glyph { color: currentColor; }
 
-  /* Une arme en service s'allume à sa couleur ; les autres restent en
-     pointillés avec le score qui les débloquera. */
+  /* Une arme en service s'allume à sa couleur. */
   .wpn.active {
     color: var(--w);
     border-color: var(--w);
     box-shadow: 0 0 18px var(--w-dim), inset 0 0 14px var(--w-dim);
   }
 
+  /* Verrouillée : pointillés, icône éteinte, et une jauge qui monte du bas
+     au rythme du score — le palier reste lisible sans un seul chiffre. */
   .wpn:not(.active) {
-    color: rgba(232,246,255,.28);
+    color: rgba(232,246,255,.26);
     border-style: dashed;
     border-color: rgba(232,246,255,.12);
   }
-  .wpn:not(.active) .glyph { opacity: .4; }
+  .wpn:not(.active) .glyph { opacity: .45; }
+  .wpn:not(.active)::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: calc(var(--p, 0) * 100%);
+    background: var(--w-dim);
+    transition: height .3s linear;
+  }
 
   /* Annonce de déblocage */
   #toast {

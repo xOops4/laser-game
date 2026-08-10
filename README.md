@@ -79,8 +79,12 @@ palier à l'autre au lieu de sauter.
 
 Le score débloque de nouvelles armes **en cours de partie**, et elles **se
 cumulent** : une fois acquise, chacune tire en même temps que les précédentes.
-Chaque partie repart du seul Rayon. La barre du bas affiche l'arsenal — ce qui
-tire s'allume, le reste indique le score à atteindre.
+Chaque partie repart du seul Rayon.
+
+La barre du bas affiche l'arsenal sous forme de carrés d'icônes, sans un mot :
+une arme en service s'allume à sa couleur, une arme verrouillée reste en
+pointillés et se **remplit par le bas** au rythme du score qui mène à son
+palier. Les noms restent accessibles aux lecteurs d'écran et au survol.
 
 | Arme | Palier | Ce qu'elle apporte |
 | --- | --- | --- |
