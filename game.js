@@ -22,6 +22,7 @@ const CFG = {
   combo: {
     killsPerStep: 8,       // kills nécessaires pour +1 au multiplicateur
     max: 10,
+    window: 5,             // secondes sans kill avant que la série retombe
   },
   spawn: {
     startInterval: 1.25,   // secondes entre deux apparitions au début
@@ -99,6 +100,27 @@ const BONUSES = {
 };
 
 const BONUS_IDS = Object.keys(BONUSES);
+
+/*
+ * Paliers de série. Ils donnent son nom et sa couleur au moment, et cette
+ * couleur irrigue tout le reste : fond, halos, débris, noyau.
+ */
+const COMBO_TIERS = [
+  { at: 1,  name: '',           color: '#4df3ff' },
+  { at: 2,  name: 'CHAÎNE',     color: '#5dffa0' },
+  { at: 4,  name: 'SÉRIE',      color: '#ffd23f' },
+  { at: 6,  name: 'FURIE',      color: '#ff9f1c' },
+  { at: 8,  name: 'DÉCHAÎNÉ',   color: '#ff3d81' },
+  // Blanc chaud plutôt que blanc pur : un blanc neutre vide le fond de sa
+  // couleur et le rend gris au lieu de le rendre incandescent.
+  { at: 10, name: 'SURCHAUFFE', color: '#ffd6ec' },
+];
+
+function comboTier(mult) {
+  let tier = COMBO_TIERS[0];
+  for (const t of COMBO_TIERS) if (mult >= t.at) tier = t;
+  return tier;
+}
 
 const DROP = {
   chance: 0.05,        // probabilité de lâcher un bonus, par ennemi tué
@@ -197,6 +219,74 @@ function resize() {
   };
 
   buildStarfield();
+  buildBgLayer();
+  if (!nebula.length) buildNebula();
+}
+
+/* ------------------------------------------------------------------ *
+ *  Halos
+ *
+ *  Un dégradé radial coûte cher à reconstruire à chaque image. On en cuit
+ *  un par couleur dans un canvas hors écran, une fois pour toutes, puis on
+ *  se contente de le redimensionner : c'est ce qui rend les halos gratuits.
+ * ------------------------------------------------------------------ */
+
+const spriteCache = new Map();
+
+function blobSprite(color) {
+  let sprite = spriteCache.get(color);
+  if (sprite) return sprite;
+
+  const size = 128;
+  sprite = document.createElement('canvas');
+  sprite.width = sprite.height = size;
+
+  const g = sprite.getContext('2d');
+  const grad = g.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  grad.addColorStop(0, hexToRgba(color, 1));
+  grad.addColorStop(0.28, hexToRgba(color, 0.42));
+  grad.addColorStop(0.6, hexToRgba(color, 0.1));
+  grad.addColorStop(1, hexToRgba(color, 0));
+  g.fillStyle = grad;
+  g.fillRect(0, 0, size, size);
+
+  spriteCache.set(color, sprite);
+  return sprite;
+}
+
+/** À n'appeler qu'en composition additive. */
+function drawBlobOn(g, x, y, r, color, alpha) {
+  if (alpha <= 0.004 || r <= 0) return;
+  g.globalAlpha = alpha;
+  g.drawImage(blobSprite(color), x - r, y - r, r * 2, r * 2);
+}
+
+function drawBlob(x, y, r, color, alpha) {
+  drawBlobOn(ctx, x, y, r, color, alpha);
+}
+
+/** Halo ponctuel qui enfle et s'éteint : mort, impact, ramassage. */
+function addFlash(x, y, r, color, life) {
+  if (game.flashes.length >= 70) return;
+  game.flashes.push({ x, y, r, color, life, maxLife: life });
+}
+
+function updateFlashes(dt) {
+  for (let i = game.flashes.length - 1; i >= 0; i--) {
+    game.flashes[i].life -= dt;
+    if (game.flashes[i].life <= 0) game.flashes.splice(i, 1);
+  }
+}
+
+function drawFlashes() {
+  if (!game.flashes.length) return;
+  ctx.globalCompositeOperation = 'lighter';
+  for (const f of game.flashes) {
+    const t = 1 - f.life / f.maxLife;
+    drawBlob(f.x, f.y, f.r * (0.6 + t * 0.9), f.color, (1 - t) * 0.85);
+  }
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
 }
 
 /* ------------------------------------------------------------------ *
@@ -225,10 +315,118 @@ function newStar(t) {
 }
 
 function updateStars(dt) {
+  // La poussière est aspirée plus vite quand la série monte.
+  const rush = 1 + game.intensity * 2.2;
   for (let i = 0; i < stars.length; i++) {
     const s = stars[i];
-    s.dist -= s.speed * dt;
+    s.dist -= s.speed * rush * dt;
     if (s.dist <= view.coreRadius) stars[i] = newStar(0);
+  }
+}
+
+/*
+ * Nébuleuses : quelques taches molles en orbite lente. Elles portent la
+ * couleur du palier de série en cours, et se dévoilent à mesure qu'il monte.
+ */
+let nebula = [];
+
+function buildNebula() {
+  nebula = [];
+  for (let i = 0; i < 4; i++) {
+    nebula.push({
+      angle: (i / 4) * TAU + rand(-0.4, 0.4),
+      dist: rand(0.25, 0.62),      // fraction du rayon d'apparition
+      drift: rand(0.035, 0.1) * (i % 2 ? 1 : -1),
+      size: rand(0.42, 0.78),
+      phase: Math.random() * TAU,
+    });
+  }
+}
+
+/*
+ * Le fond couvre tout l'écran plusieurs fois par image : au plein format il
+ * sature le taux de remplissage d'un mobile. Comme il est entièrement flou,
+ * on le peint dans un calque au tiers de la résolution qu'on ré-étire —
+ * neuf fois moins de pixels, aucune différence visible.
+ */
+const BG_SCALE = 0.34;
+let bgLayer = null;
+let bgCtx = null;
+
+function buildBgLayer() {
+  bgLayer = document.createElement('canvas');
+  bgLayer.width = Math.max(1, Math.round(view.w * BG_SCALE));
+  bgLayer.height = Math.max(1, Math.round(view.h * BG_SCALE));
+  bgCtx = bgLayer.getContext('2d');
+}
+
+function drawBackground(dt) {
+  const { w, h, cx, cy } = view;
+  const heat = game.intensity;
+
+  ctx.fillStyle = '#05060c';
+  ctx.fillRect(0, 0, w, h);
+
+  const g = bgCtx;
+  const k = BG_SCALE;
+  g.clearRect(0, 0, bgLayer.width, bgLayer.height);
+  g.globalCompositeOperation = 'lighter';
+
+  // Teinte de fond : bleu profond au repos, virant lentement au violet à
+  // mesure que la partie dure — deux parties longues ne se ressemblent pas.
+  const base = game.time < 100 ? '#0e2a6b' : '#3a1b6e';
+  drawBlobOn(g, cx * k, cy * k, view.spawnRadius * 1.1 * k, base, 0.1 + heat * 0.06);
+
+  for (const n of nebula) {
+    n.angle += n.drift * dt * (1 + heat * 1.6);
+    const r = view.spawnRadius * n.dist;
+    const x = (cx + Math.cos(n.angle) * r) * k;
+    const y = (cy + Math.sin(n.angle) * r) * k;
+    const breathe = 1 + Math.sin(game.corePulse * 0.6 + n.phase) * 0.12;
+    const size = view.spawnRadius * n.size * breathe * k;
+    const alpha = 0.05 + heat * 0.17;
+
+    // Fondu enchaîné entre l'ancien palier et le nouveau.
+    drawBlobOn(g, x, y, size, game.tierFrom, alpha * (1 - game.tierBlend));
+    drawBlobOn(g, x, y, size, game.tierTo, alpha * game.tierBlend);
+  }
+  g.globalAlpha = 1;
+
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.drawImage(bgLayer, 0, 0, w, h);
+  ctx.globalCompositeOperation = 'source-over';
+
+  drawGrid(heat);
+}
+
+/** Grille polaire : anneaux fixes et rayons qui tournent avec l'intensité. */
+function drawGrid(heat) {
+  const { cx, cy } = view;
+  const color = game.tierTo;
+
+  ctx.strokeStyle = hexToRgba(color, 0.05 + heat * 0.07);
+  ctx.lineWidth = 1;
+  const step = Math.max(70, Math.min(view.w, view.h) / 5);
+  const breathe = 1 + Math.sin(game.corePulse * 1.6) * 0.012 * (0.3 + heat);
+  for (let r = view.coreRadius + step; r < view.spawnRadius; r += step) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, r * breathe, 0, TAU);
+    ctx.stroke();
+  }
+
+  if (heat < 0.02) return;
+
+  ctx.strokeStyle = hexToRgba(color, heat * 0.09);
+  const spokes = 12;
+  const spin = game.corePulse * (0.06 + heat * 0.28);
+  for (let i = 0; i < spokes; i++) {
+    const a = spin + (i / spokes) * TAU;
+    const ux = Math.cos(a);
+    const uy = Math.sin(a);
+    ctx.beginPath();
+    ctx.moveTo(cx + ux * view.coreRadius * 1.6, cy + uy * view.coreRadius * 1.6);
+    ctx.lineTo(cx + ux * view.spawnRadius, cy + uy * view.spawnRadius);
+    ctx.stroke();
   }
 }
 
@@ -244,8 +442,13 @@ const game = {
   score: 0,
   best: loadBest(),
   kills: 0,
-  combo: 0,             // kills consécutifs sans encaisser
+  combo: 0,             // kills enchaînés
+  comboTimer: 0,        // temps restant pour prolonger la série
   multiplier: 1,
+  intensity: 0,         // 0..1, lissé : pilote le fond et les halos
+  tierFrom: '#4df3ff',  // fondu enchaîné entre paliers de série
+  tierTo: '#4df3ff',
+  tierBlend: 1,
   hp: CFG.core.hpMax,
   unlocked: [true],     // un booléen par arme ; les armes se cumulent
   buffs: {},            // id de bonus -> secondes restantes
@@ -254,6 +457,7 @@ const game = {
   enemies: [],
   pickups: [],
   particles: [],
+  flashes: [],          // halos ponctuels
   rings: [],            // ondes de choc en cours d'expansion
   spawnTimer: 0,
   shake: 0,
@@ -281,7 +485,11 @@ function resetGame() {
   game.score = 0;
   game.kills = 0;
   game.combo = 0;
+  game.comboTimer = 0;
   game.multiplier = 1;
+  game.intensity = 0;
+  game.tierFrom = game.tierTo = COMBO_TIERS[0].color;
+  game.tierBlend = 1;
   game.hp = CFG.core.hpMax;
   game.unlocked = WEAPONS.map((w) => w.unlock === 0);
   game.buffs = {};
@@ -290,7 +498,9 @@ function resetGame() {
   game.enemies.length = 0;
   game.pickups.length = 0;
   game.particles.length = 0;
+  game.flashes.length = 0;
   game.rings.length = 0;
+  buildNebula();
   game.spawnTimer = 0.6;
   game.shake = 0;
   game.coreFlash = 0;
@@ -553,6 +763,10 @@ function sfxBuffEnd() {
   tone(420, 0.18, { to: 210, type: 'sine', gain: 0.09 });
 }
 
+function sfxComboBreak() {
+  tone(300, 0.26, { to: 110, type: 'triangle', gain: 0.11 });
+}
+
 function sfxCombo(mult) {
   const base = 520 * Math.pow(1.06, mult);
   tone(base, 0.1, { type: 'triangle', gain: 0.14 });
@@ -655,6 +869,8 @@ function killEnemy(enemy, index) {
   game.kills++;
   game.combo++;
 
+  game.comboTimer = CFG.combo.window;   // chaque kill relance la fenêtre
+
   const before = game.multiplier;
   game.multiplier = clamp(
     1 + Math.floor(game.combo / CFG.combo.killsPerStep),
@@ -665,21 +881,59 @@ function killEnemy(enemy, index) {
 
   const big = enemy.def.hp > 60;
   const size = enemy.radius;
+  const tier = comboTier(game.multiplier);
+  const heat = game.intensity;
 
-  shards(enemy.x, enemy.y, enemy.def.color, Math.round(9 + size * 0.8), big ? 1.35 : 1);
+  // Plus la série est chaude, plus la mort est spectaculaire, et la couleur
+  // du palier vient se mêler à celle de l'ennemi.
+  shards(enemy.x, enemy.y, enemy.def.color,
+    Math.round((9 + size * 0.8) * (1 + heat * 0.8)), big ? 1.35 : 1);
   burst(enemy.x, enemy.y, '#ffffff', Math.round(4 + size * 0.35), 0.85);
   embers(enemy.x, enemy.y, enemy.def.color, Math.round(3 + size * 0.4));
+  if (heat > 0.15) shards(enemy.x, enemy.y, tier.color, Math.round(4 + heat * 10), 1.5);
+
+  addFlash(enemy.x, enemy.y, size * (big ? 5 : 3.4), '#ffffff', big ? 0.3 : 0.2);
+  addFlash(enemy.x, enemy.y, size * (big ? 7 : 5), tier.color, 0.35);
   shockRingAt(enemy.x, enemy.y, enemy.def.color, size * (big ? 4.2 : 2.8), big ? 0.4 : 0.28);
 
   if (big) game.shake = Math.max(game.shake, 6);
   sfxKill(enemy);
   maybeDropBonus(enemy);
 
-  // Palier de combo franchi : anneau doré et petit carillon.
-  if (game.multiplier > before) {
-    shockRing('#ffd23f', view.coreRadius * 3.4, 0.5, 2);
-    sfxCombo(game.multiplier);
+  if (game.multiplier > before) comboTierUp(before);
+}
+
+/** Franchissement d'un palier : le décor entier change de couleur. */
+function comboTierUp(before) {
+  const tier = comboTier(game.multiplier);
+
+  if (tier !== comboTier(before)) {
+    game.tierFrom = game.tierTo;
+    game.tierTo = tier.color;
+    game.tierBlend = 0;
+    if (tier.name) {
+      showBanner(tier.name, `Multiplicateur ×${game.multiplier}`, tier.color);
+      game.shake = Math.max(game.shake, 5);
+      vibrate([12, 30, 12]);
+    }
   }
+
+  shockRing(tier.color, view.coreRadius * 4.2, 0.55, 3);
+  addFlash(view.cx, view.cy, view.coreRadius * 5, tier.color, 0.4);
+  sfxCombo(game.multiplier);
+}
+
+/** La série retombe faute de kill dans la fenêtre. Sans autre punition. */
+function breakCombo() {
+  if (game.combo === 0) return;
+  const had = game.multiplier;
+  game.combo = 0;
+  game.comboTimer = 0;
+  game.multiplier = 1;
+  game.tierFrom = game.tierTo;
+  game.tierTo = COMBO_TIERS[0].color;
+  game.tierBlend = 0;
+  if (had > 1) sfxComboBreak();
 }
 
 /* ------------------------------------------------------------------ *
@@ -799,12 +1053,20 @@ function update(dt) {
     fireAll(dt);
     updatePickups(dt);
     updateBuffs(dt);
+    updateCombo(dt);
     checkUnlocks();
   }
 
   updateParticles(dt);
   updateRings(dt);
   updateStars(dt);
+  updateFlashes(dt);
+
+  // L'intensité suit le multiplicateur avec de l'inertie : le décor respire
+  // au lieu de sauter d'un palier à l'autre.
+  const target = (game.multiplier - 1) / (CFG.combo.max - 1);
+  game.intensity += (target - game.intensity) * Math.min(1, dt * 2.2);
+  game.tierBlend = Math.min(1, game.tierBlend + dt * 1.5);
 
   game.shake = Math.max(0, game.shake - dt * 42);
   game.coreFlash = Math.max(0, game.coreFlash - dt * 4);
@@ -863,8 +1125,7 @@ function updateEnemies(dt) {
 
 function hitCore(enemy) {
   game.hp -= enemy.def.damage;
-  game.combo = 0;
-  game.multiplier = 1;
+  breakCombo();
   game.shake = Math.min(22, 8 + enemy.def.damage * 0.4);
   game.coreFlash = 1;
 
@@ -872,6 +1133,7 @@ function hitCore(enemy) {
   shards(enemy.x, enemy.y, enemy.def.color, 10, 1.1);
   embers(enemy.x, enemy.y, '#ff3d81', 8);
   shockRing('#ff3d81', view.coreRadius * 4.6, 0.5, 4);
+  addFlash(view.cx, view.cy, view.coreRadius * 4.5, '#ff3d81', 0.45);
 
   vibrate(enemy.def.damage >= 20 ? 55 : 30);
   sfxCoreHit(enemy);
@@ -893,6 +1155,7 @@ function endGame() {
   shards(view.cx, view.cy, '#ff3d81', 60, 1.9);
   burst(view.cx, view.cy, '#ffffff', 50, 2.2);
   embers(view.cx, view.cy, '#4df3ff', 40);
+  addFlash(view.cx, view.cy, view.spawnRadius * 0.8, '#ffffff', 0.8);
   shockRing('#ffffff', view.spawnRadius * 0.9, 0.7, 6);
   shockRing('#ff3d81', view.spawnRadius * 0.65, 0.9, 3);
 
@@ -1029,6 +1292,7 @@ function hitEnemy(enemy, index, damage, ux, uy) {
   if (sparkCooldown > 0) return;
   sparkCooldown = 0.028;
   sfxHit();
+  addFlash(enemy.x, enemy.y, enemy.radius * 2.2, '#ffffff', 0.1);
 
   // Les étincelles giclent à contresens du tir, depuis le point d'impact.
   const ix = enemy.x - ux * enemy.radius;
@@ -1122,11 +1386,18 @@ function collectBonus(pickup) {
   }
 
   shockRingAt(pickup.x, pickup.y, def.color, 90, 0.45, 3);
+  addFlash(pickup.x, pickup.y, 70, def.color, 0.4);
   burst(pickup.x, pickup.y, def.color, 26, 1.3);
   shards(pickup.x, pickup.y, '#ffffff', 10, 1);
   showBanner(def.name, def.blurb, def.color);
   vibrate([10, 25, 10]);
   sfxPickup();
+}
+
+function updateCombo(dt) {
+  if (game.combo === 0) return;
+  game.comboTimer -= dt;
+  if (game.comboTimer <= 0) breakCombo();
 }
 
 function updateBuffs(dt) {
@@ -1175,15 +1446,11 @@ function glowLine(x1, y1, x2, y2, color, width) {
   ctx.globalCompositeOperation = 'source-over';
 }
 
-function render() {
-  const { w, h } = view;
-
+function render(dt) {
   ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = 'source-over';
 
-  // Fond
-  ctx.fillStyle = '#05060c';
-  ctx.fillRect(0, 0, w, h);
+  drawBackground(dt);
 
   ctx.save();
 
@@ -1193,7 +1460,7 @@ function render() {
   }
 
   drawStars();
-  drawArena();
+  drawFlashes();
   drawRings();
   drawParticles();
 
@@ -1231,19 +1498,6 @@ function drawStars() {
 
   ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = 'source-over';
-}
-
-/** Anneaux concentriques discrets : repère visuel de la distance au noyau. */
-function drawArena() {
-  const { cx, cy } = view;
-  ctx.strokeStyle = 'rgba(77,243,255,0.06)';
-  ctx.lineWidth = 1;
-  const step = Math.max(70, Math.min(view.w, view.h) / 5);
-  for (let r = view.coreRadius + step; r < view.spawnRadius; r += step) {
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, TAU);
-    ctx.stroke();
-  }
 }
 
 /** Tous les rayons en service, plus les tirs des satellites. */
@@ -1462,15 +1716,13 @@ function drawCore() {
   const pulse = 1 + Math.sin(game.corePulse * 2.2) * 0.03;
   const hpFrac = game.hp / CFG.core.hpMax;
 
-  // Aura
+  // Aura, teintée par le palier de série et gonflée par l'intensité.
   ctx.globalCompositeOperation = 'lighter';
-  const aura = ctx.createRadialGradient(cx, cy, R * 0.4, cx, cy, R * 2.4);
-  aura.addColorStop(0, 'rgba(77,243,255,0.30)');
-  aura.addColorStop(1, 'rgba(77,243,255,0)');
-  ctx.fillStyle = aura;
-  ctx.beginPath();
-  ctx.arc(cx, cy, R * 2.4, 0, TAU);
-  ctx.fill();
+  const beat = 1 + Math.sin(game.corePulse * (3 + game.intensity * 6)) * 0.05 * (0.4 + game.intensity);
+  const auraR = R * (2.4 + game.intensity * 1.5) * beat;
+  drawBlob(cx, cy, auraR, game.tierFrom, 0.3 * (1 - game.tierBlend));
+  drawBlob(cx, cy, auraR, game.tierTo, 0.3 * game.tierBlend);
+  ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = 'source-over';
 
   // Corps
@@ -1550,20 +1802,59 @@ function drawHud() {
   ctx.font = `700 ${Math.round(28 * s)}px ui-sans-serif, system-ui, sans-serif`;
   ctx.fillText(String(game.score), padX, padY);
 
-  // Multiplicateur
-  if (game.multiplier > 1) {
-    ctx.fillStyle = '#ffd23f';
-    ctx.font = `700 ${Math.round(15 * s)}px ui-sans-serif, system-ui, sans-serif`;
-    ctx.fillText(`×${game.multiplier}`, padX, padY + Math.round(32 * s));
-  }
-
-  drawBuffChips(padX, padY + Math.round((game.multiplier > 1 ? 56 : 36) * s), s);
+  const comboRows = drawCombo(padX, padY + Math.round(32 * s), s);
+  drawBuffChips(padX, padY + Math.round((32 + comboRows) * s), s);
 
   // Chrono, centré : le coin droit appartient au coupe-son.
   ctx.textAlign = 'center';
   ctx.fillStyle = 'rgba(232,246,255,0.55)';
   ctx.font = `600 ${Math.round(15 * s)}px ui-sans-serif, system-ui, sans-serif`;
   ctx.fillText(formatTime(game.time), view.w / 2, padY + 6);
+}
+
+/**
+ * Série en cours : multiplicateur, nom du palier, nombre de kills enchaînés,
+ * et une barre qui se vide — le temps qu'il reste pour la prolonger.
+ * Renvoie la hauteur occupée, en unités d'échelle.
+ */
+function drawCombo(x, y, s) {
+  if (game.combo === 0) return 4;
+
+  const tier = comboTier(game.multiplier);
+  const frac = clamp(game.comboTimer / CFG.combo.window, 0, 1);
+  // L'urgence se lit avant même de regarder la barre.
+  const urgent = frac < 0.3;
+  const blink = urgent ? 0.55 + 0.45 * Math.sin(game.corePulse * 14) : 1;
+
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+
+  ctx.globalAlpha = blink;
+  ctx.fillStyle = tier.color;
+  ctx.font = `800 ${Math.round(21 * s)}px ui-sans-serif, system-ui, sans-serif`;
+  const mult = `×${game.multiplier}`;
+  ctx.fillText(mult, x, y + 17 * s);
+
+  const nameX = x + ctx.measureText(mult).width + 7 * s;
+  ctx.font = `700 ${Math.round(11 * s)}px ui-sans-serif, system-ui, sans-serif`;
+  if (tier.name) ctx.fillText(tier.name, nameX, y + 16 * s);
+
+  ctx.globalAlpha = 0.6 * blink;
+  ctx.font = `600 ${Math.round(10 * s)}px ui-sans-serif, system-ui, sans-serif`;
+  ctx.fillText(`${game.combo} enchaînés`, nameX, y + 5 * s);
+
+  // Barre de fenêtre
+  const barW = 96 * s;
+  const barY = y + 23 * s;
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = hexToRgba(tier.color, 0.16);
+  ctx.fillRect(x, barY, barW, 3 * s);
+  ctx.fillStyle = hexToRgba(tier.color, blink);
+  ctx.fillRect(x, barY, barW * frac, 3 * s);
+
+  ctx.globalAlpha = 1;
+  ctx.textBaseline = 'top';
+  return 34;
 }
 
 /** Effets en cours, avec leur temps restant sous forme de barre qui fond. */
@@ -1691,6 +1982,7 @@ function showBanner(title, sub, color) {
 function announceUnlock(w) {
   showBanner(`${w.name} débloqué`, w.blurb, w.color);
   shockRing(w.color, view.spawnRadius * 0.55, 0.8, 3);
+  addFlash(view.cx, view.cy, view.coreRadius * 7, w.color, 0.6);
   burst(view.cx, view.cy, w.color, 40, 1.6);
   vibrate([15, 40, 15]);
   sfxUnlock();
@@ -1795,7 +2087,7 @@ function frame(now) {
   lastTime = now;
 
   update(dt);
-  render();
+  render(dt);
 
   requestAnimationFrame(frame);
 }
@@ -1809,4 +2101,4 @@ showMenu();
 requestAnimationFrame(frame);
 
 /* Poignée de débogage : permet d'inspecter l'état depuis la console. */
-window.VIRGULE = { game, view, input, audio, CFG, ENEMY_TYPES, WEAPONS };
+window.VIRGULE = { game, view, input, audio, CFG, ENEMY_TYPES, WEAPONS, BONUSES, COMBO_TIERS };

@@ -29,11 +29,31 @@ quel hébergeur de fichiers.
 - Les dégâts sont **par seconde** : il faut rester une fraction de seconde sur
   une cible. Les gros demandent plusieurs passages.
 - Chaque ennemi qui atteint le noyau enlève des points de vie (l'anneau autour
-  du noyau) et **remet le multiplicateur à zéro**.
-- Le multiplicateur monte d'un cran tous les 8 kills consécutifs sans encaisser,
-  jusqu'à ×10.
+  du noyau) et **casse la série**.
 
 La souris fonctionne exactement comme le doigt sur ordinateur.
+
+## Séries
+
+Enchaîner les kills fait monter un multiplicateur, d'un cran tous les 8 kills,
+jusqu'à ×10. Deux façons de le perdre : encaisser un coup, ou **laisser passer
+5 secondes sans tuer** — une barre sous le multiplicateur montre le temps
+restant et clignote quand il s'épuise.
+
+Le multiplicateur traverse cinq paliers nommés, et **c'est la couleur du palier
+qui pilote tout le décor** : nébuleuses de fond, grille polaire, aura du noyau,
+halos et débris d'explosion s'y accordent.
+
+| Palier | À partir de | Couleur |
+| --- | --- | --- |
+| Chaîne | ×2 | vert menthe |
+| Série | ×4 | jaune |
+| Furie | ×6 | ambre |
+| Déchaîné | ×8 | rose vif |
+| Surchauffe | ×10 | blanc chaud |
+
+L'intensité qui en découle est lissée dans le temps : le décor respire d'un
+palier à l'autre au lieu de sauter.
 
 ## Armes
 
@@ -91,7 +111,8 @@ game.js      tout le jeu : boucle, entrées, ennemis, laser, rendu
 ```
 
 Les réglages d'équilibrage sont regroupés en haut de `game.js` dans quatre
-objets : `CFG` (noyau, combo, cadence d'apparition, rampes), `WEAPONS` (un bloc
+objets : `CFG` (noyau, séries, cadence d'apparition, rampes), `COMBO_TIERS`
+(paliers et couleurs, qui pilotent le décor), `WEAPONS` (un bloc
 par arme, avec son palier de déblocage), `BONUSES` + `DROP` (effets et taux de
 chute) et `ENEMY_TYPES` (un bloc par type d'ennemi). Tout se règle là, sans
 toucher au reste.
@@ -124,8 +145,15 @@ le choix est retenu en `localStorage`.
 - Les particules ont deux formes : `dot` (carré, bon marché) et `streak`
   (segment étiré par la vitesse, réservé aux explosions). Plafond à 900. Les
   traînées de réacteur se coupent au-delà de 45 ennemis pour tenir le budget.
-- Le fond n'est pas fixe : la poussière dérive vers le noyau avec un effet de
-  parallaxe, et se régénère au bord une fois absorbée.
+- Les halos ne reconstruisent jamais de dégradé : un sprite radial est cuit
+  une fois par couleur dans un canvas hors écran, puis simplement redimensionné.
+- Le fond couvre l'écran plusieurs fois par image, ce qui sature le taux de
+  remplissage d'un mobile au plein format. Comme il est entièrement flou, il
+  est peint dans un calque au tiers de la résolution puis ré-étiré : neuf fois
+  moins de pixels, aucune différence visible. Sans cette astuce, la charge
+  maximale tombait à 31 fps.
+- La poussière de fond dérive vers le noyau avec un effet de parallaxe, se
+  régénère au bord une fois absorbée, et accélère avec l'intensité.
 - Gestes natifs neutralisés : zoom au double-tap, scroll élastique, sélection,
   surbrillance au tap. Encoches gérées via `env(safe-area-inset-*)`.
 - Pas de temps borné à 50 ms : un retour d'arrière-plan ne téléporte pas les
@@ -136,8 +164,9 @@ le choix est retenu en `localStorage`.
   bloqué (navigation privée, iframe sandboxée).
 - Vibration courte quand le noyau encaisse, sur les appareils qui la supportent.
 
-Mesuré à 60 fps en émulation iPhone 13 avec 100 ennemis à l'écran, le rayon
-actif et les explosions en chaîne.
+Mesuré à 59 fps en émulation iPhone 13 dans le pire cas : 100 ennemis à
+l'écran, les quatre armes cumulées, deux bonus actifs, série à ×10 et
+explosions en chaîne.
 
 ## Pas encore fait
 
