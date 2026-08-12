@@ -20,6 +20,34 @@ python3 -m http.server 8000
 Le jeu est entièrement statique : il peut être servi tel quel par n'importe
 quel hébergeur de fichiers.
 
+## Terrains
+
+Deux dispositions, choisies au menu et retenues en `localStorage`.
+
+**Orbite** — le noyau au centre, les ennemis de toutes parts. Le mode
+d'origine.
+
+**Rempart** — le noyau posé en bas de l'écran, les ennemis descendent du haut
+dans un cône de ±74°. Le canon ne passe jamais sous l'horizontale, les
+satellites et les mines se répartissent sur l'arc supérieur au lieu de plonger
+sous le socle, et un rayon qui viserait le sol est **rabattu en miroir
+au-dessus de l'horizon** — c'est ce qui sauve le Revers, qui couvre alors le
+flanc opposé à celui qu'on vise au lieu de tirer dans le décor.
+
+Tout le jeu étant écrit en coordonnées polaires autour du noyau, le second
+mode se résume à déplacer ce noyau et à restreindre l'arc : armes, bonus,
+séries et ennemis fonctionnent sans modification.
+
+L'équilibrage, lui, a demandé du travail. Un arc deux fois plus étroit signifie
+qu'un seul balayage couvre en permanence tout le cône de menace : à réglages
+identiques, le noyau n'était **jamais touché en deux minutes**, les ennemis
+mourant à 300 px. Doubler la cadence n'y changeait rien, ni les faire naître au
+ras du bord plutôt que sur un cercle plus large — le facteur limitant n'est pas
+leur nombre ni leur trajet, mais leur survie face à un rayon qui ne les quitte
+jamais. En Rempart ils ont donc +50 % de points de vie et +28 % de vitesse, ce
+qui ramène les deux modes dans la même bande : 2 morts sur 3 parties de bot,
+à 45 s et 62 s, contre une médiane de 67 s en Orbite.
+
 ## Visée
 
 Deux modes, choisis depuis le menu ou l'écran de pause, retenus en
@@ -175,7 +203,8 @@ game.js      tout le jeu : boucle, entrées, ennemis, laser, rendu
 ```
 
 Les réglages d'équilibrage sont regroupés en haut de `game.js` dans quatre
-objets : `CFG` (noyau, séries, cadence d'apparition, rampes), `COMBO_TIERS`
+objets : `MODES` (disposition et compensations de chaque terrain), `CFG`
+(noyau, séries, cadence d'apparition, rampes), `COMBO_TIERS`
 (paliers et couleurs, qui pilotent le décor), `WEAPONS` (un bloc
 par arme, avec son palier de déblocage), `BONUSES` + `DROP` (effets et taux de
 chute) et `ENEMY_TYPES` (un bloc par type d'ennemi). Tout se règle là, sans

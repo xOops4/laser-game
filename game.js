@@ -237,6 +237,104 @@ const ENEMY_TYPES = {
   },
 };
 
+/*
+ * Deux dispositions. Tout le reste du jeu — armes, bonus, séries, ennemis —
+ * est écrit en coordonnées polaires autour du noyau, si bien qu'il suffit de
+ * déplacer ce noyau et de restreindre l'arc pour obtenir un second mode.
+ *
+ *  - halfArc : le jeu se joue sur l'hémisphère supérieur seulement
+ *  - spread  : demi-ouverture du cône d'apparition, en radians
+ *  - rate    : multiplicateur de cadence, pour compenser l'arc plus étroit
+ */
+const MODES = {
+  orbite: {
+    name: 'Orbite', halfArc: false, spread: Math.PI, rate: 1,
+    hpMul: 1, speedMul: 1,
+    hint: 'Le noyau au centre, les ennemis de toutes parts.',
+  },
+  rempart: {
+    /*
+     * L'arc est deux fois plus étroit, donc un seul balayage couvre en
+     * permanence tout le cône de menace. Mesuré : les ennemis mouraient à
+     * 300 px et le noyau n'était jamais touché en deux minutes. Doubler la
+     * cadence n'y changeait rien — le facteur limitant n'est pas le nombre
+     * mais la survie de chacun face à un rayon qui ne les quitte jamais.
+     * D'où des ennemis nettement plus coriaces et plus rapides.
+     */
+    name: 'Rempart', halfArc: true, spread: 1.3, rate: 0.62,
+    hpMul: 1.5, speedMul: 1.28,
+    hint: 'Le noyau posé en bas, les ennemis descendent du haut.',
+  },
+};
+
+const MODE_KEY = 'virgule.mode';
+
+function loadMode() {
+  try { return localStorage.getItem(MODE_KEY) === 'rempart' ? 'rempart' : 'orbite'; }
+  catch (_) { return 'orbite'; }
+}
+
+let gameMode = loadMode();
+
+function setGameMode(m) {
+  gameMode = m;
+  try { localStorage.setItem(MODE_KEY, m); } catch (_) { /* tant pis */ }
+  resize();
+}
+
+function mode() {
+  return MODES[gameMode];
+}
+
+/**
+ * Distance d'apparition dans une direction donnée.
+ *
+ * En Orbite on garde un cercle : tous les ennemis parcourent la même course,
+ * et l'équilibrage repose dessus. En Rempart, le noyau est en bas, donc ce
+ * cercle mesurerait 653 px là où l'écran n'en fait que 664 de haut — les
+ * ennemis passaient 50 % de temps en plus à voyager et mouraient bien avant
+ * d'être une menace. On les fait donc naître juste au-delà du bord visible,
+ * dans leur direction propre.
+ */
+function spawnDistance(ux, uy) {
+  if (!mode().halfArc) return view.spawnRadius;
+
+  const tx = ux > 0 ? (view.w - view.cx) / ux : (ux < 0 ? -view.cx / ux : Infinity);
+  const ty = uy > 0 ? (view.h - view.cy) / uy : (uy < 0 ? -view.cy / uy : Infinity);
+  return Math.min(tx, ty) + 70;
+}
+
+/**
+ * Position angulaire d'un emplacement en orbite (satellite ou mine).
+ * En Rempart, les emplacements se répartissent sur l'arc supérieur et se
+ * balancent doucement, plutôt que de plonger sous le socle.
+ */
+function slotAngle(i, count, phase) {
+  if (!mode().halfArc) return phase + (i / count) * TAU;
+  return -Math.PI + ((i + 0.5) / count) * Math.PI + Math.sin(phase) * 0.22;
+}
+
+/** En Rempart, le canon ne descend jamais sous l'horizontale. */
+function clampAim(a) {
+  if (!mode().halfArc) return a;
+  if (a <= 0) return a;                        // déjà dans l'hémisphère haut
+  return a <= Math.PI / 2 ? -0.04 : -Math.PI + 0.04;
+}
+
+/**
+ * Angle réel d'un rayon, décalage compris.
+ *
+ * En Rempart, un rayon qui plongerait sous l'horizon est rabattu au-dessus
+ * en miroir. C'est ce qui sauve le Revers : au lieu de tirer dans le socle,
+ * il couvre le flanc opposé à celui que l'on vise.
+ */
+function beamAngleFor(offset) {
+  const a = input.angle + offset;
+  if (!mode().halfArc) return a;
+  const n = Math.atan2(Math.sin(a), Math.cos(a));   // ramené dans (-PI, PI]
+  return n > 0 ? -n : n;
+}
+
 const BEST_KEY = 'virgule.best';
 
 /* ------------------------------------------------------------------ *
@@ -353,9 +451,21 @@ function resize() {
   view.w = w;
   view.h = h;
   view.cx = w / 2;
-  view.cy = h / 2;
-  // Le coin le plus éloigné du centre, plus une marge : rien n'apparaît à l'écran.
-  view.spawnRadius = Math.hypot(w, h) / 2 + 60;
+
+  const cs0 = getComputedStyle(safeProbe);
+  const safeBottom = parseFloat(cs0.paddingBottom) || 0;
+
+  if (mode().halfArc) {
+    // Posé en bas, juste au-dessus de la barre d'armes.
+    view.cy = h - (safeBottom + 104);
+    // Le point visible le plus éloigné est un coin haut.
+    view.spawnRadius = Math.hypot(w / 2, view.cy) + 60;
+  } else {
+    view.cy = h / 2;
+    // Le coin le plus éloigné du centre, plus une marge.
+    view.spawnRadius = Math.hypot(w, h) / 2 + 60;
+  }
+
   view.coreRadius = clamp(
     Math.min(w, h) * CFG.core.radiusFactor,
     CFG.core.radiusMin,
@@ -733,7 +843,7 @@ function updateAngleFrom(e) {
   const min = aimMode === 'pouce' ? CFG.aim.deadzone : 1;
   if (dx * dx + dy * dy < min * min) return;
 
-  input.angle = Math.atan2(dy, dx);
+  input.angle = clampAim(Math.atan2(dy, dx));
   input.hasAngle = true;
 }
 
@@ -1094,7 +1204,7 @@ function pickEnemyType() {
 /** Un Essaim abattu se disperse en éclats vivants autour de sa position. */
 function splitEnemy(parent) {
   const def = ENEMY_TYPES[parent.def.splitInto];
-  const hpScale = 1 + game.time / CFG.spawn.hpRampTime;
+  const hpScale = (1 + game.time / CFG.spawn.hpRampTime) * mode().hpMul;
 
   for (let i = 0; i < parent.def.splitCount; i++) {
     const a = (i / parent.def.splitCount) * TAU + Math.random();
@@ -1118,7 +1228,7 @@ function makeEnemy(def, opts) {
     y: opts.y,
     hp: opts.hp,
     hpMax: opts.hp,
-    speed: def.speed * speedMul * rand(0.9, 1.12),
+    speed: def.speed * speedMul * mode().speedMul * rand(0.9, 1.12),
     radius: def.radius,
     rot: opts.angle + Math.PI,
     spin: rand(-1.6, 1.6),
@@ -1132,14 +1242,21 @@ function makeEnemy(def, opts) {
 
 function spawnEnemy() {
   const def = pickEnemyType();
-  const angle = Math.random() * TAU;
+  // En Rempart, un cône centré sur le haut de l'écran ; sinon tout le tour.
+  const angle = mode().halfArc
+    ? -Math.PI / 2 + rand(-mode().spread, mode().spread)
+    : Math.random() * TAU;
   // Les armes se cumulant, les ennemis s'endurcissent pour que la fin de
   // partie garde du mordant. +100 % de PV au bout de 260 s.
-  const hp = def.hp * (1 + game.time / CFG.spawn.hpRampTime);
+  const hp = def.hp * (1 + game.time / CFG.spawn.hpRampTime) * mode().hpMul;
+
+  const ux = Math.cos(angle);
+  const uy = Math.sin(angle);
+  const d = spawnDistance(ux, uy);
 
   game.enemies.push(makeEnemy(def, {
-    x: view.cx + Math.cos(angle) * view.spawnRadius,
-    y: view.cy + Math.sin(angle) * view.spawnRadius,
+    x: view.cx + ux * d,
+    y: view.cy + uy * d,
     hp,
     angle,
   }));
@@ -1415,7 +1532,7 @@ function update(dt) {
     game.time += dt;
 
     // Cadence d'apparition, de plus en plus rapide.
-    const interval = lerp(CFG.spawn.startInterval, CFG.spawn.endInterval, difficulty());
+    const interval = lerp(CFG.spawn.startInterval, CFG.spawn.endInterval, difficulty()) * mode().rate;
     game.spawnTimer -= dt;
     if (game.spawnTimer <= 0) {
       spawnEnemy();
@@ -1694,7 +1811,7 @@ function updateMines(w, dt) {
     const mine = game.mines[i];
     if (mine.cooldown > 0) { mine.cooldown -= dt; continue; }
 
-    const a = game.mineAngle + (i / w.count) * TAU;
+    const a = slotAngle(i, w.count, game.mineAngle);
     const mx = view.cx + Math.cos(a) * orbitR;
     const my = view.cy + Math.sin(a) * orbitR;
 
@@ -1836,7 +1953,7 @@ function fireBeams(w, dt) {
   const damage = w.dps * dt * damageMultiplier();
 
   for (const offset of beamOffsets(w)) {
-    const angle = input.angle + offset;
+    const angle = beamAngleFor(offset);
     const ux = Math.cos(angle);
     const uy = Math.sin(angle);
 
@@ -1878,7 +1995,7 @@ function fireOrbiters(w, dt) {
 
   const count = orbiterCount(w);
   for (let s = 0; s < count; s++) {
-    const a = game.orbitAngle + (s / count) * TAU;
+    const a = slotAngle(s, count, game.orbitAngle);
     const sx = view.cx + Math.cos(a) * orbitR;
     const sy = view.cy + Math.sin(a) * orbitR;
 
@@ -2014,7 +2131,7 @@ function beamTouches(x, y, slack) {
 
     const reach = view.spawnRadius * w.range;
     for (const offset of beamOffsets(w)) {
-      const a = input.angle + offset;
+      const a = beamAngleFor(offset);
       const ux = Math.cos(a);
       const uy = Math.sin(a);
       const along = dx * ux + dy * uy;
@@ -2203,7 +2320,7 @@ function drawWeapon() {
 
       const reach = view.spawnRadius * w.range;
       for (const offset of beamOffsets(w)) {
-        const angle = input.angle + offset;
+        const angle = beamAngleFor(offset);
         const ux = Math.cos(angle);
         const uy = Math.sin(angle);
         glowLine(
@@ -2252,7 +2369,7 @@ function drawMines() {
 
   for (let i = 0; i < game.mines.length; i++) {
     const mine = game.mines[i];
-    const a = game.mineAngle + (i / game.mines.length) * TAU;
+    const a = slotAngle(i, game.mines.length, game.mineAngle);
     const x = view.cx + Math.cos(a) * orbitR;
     const y = view.cy + Math.sin(a) * orbitR;
 
@@ -2365,7 +2482,7 @@ function drawOrbiters() {
   ctx.globalCompositeOperation = 'lighter';
   const count = orbiterCount(w);
   for (let s = 0; s < count; s++) {
-    const a = game.orbitAngle + (s / count) * TAU;
+    const a = slotAngle(s, count, game.orbitAngle);
     const x = view.cx + Math.cos(a) * orbitR;
     const y = view.cy + Math.sin(a) * orbitR;
     const r = 5.5 * view.scale;
@@ -2575,6 +2692,8 @@ function drawCore() {
   ctx.fill();
   ctx.globalCompositeOperation = 'source-over';
 
+  if (mode().halfArc) drawRampart(R, hpFrac);
+
   // Anneau de points de vie
   const ringR = R + 8;
   ctx.lineWidth = 4;
@@ -2669,6 +2788,44 @@ function drawStick() {
     drawBlob(kx, ky, 14, game.tierTo, 0.5);
   }
 
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+/**
+ * Socle du mode Rempart : une ligne d'horizon et un empattement sous le
+ * noyau. Sans repère au sol, un noyau posé en bas ressemble à un noyau
+ * centré qu'on aurait mal cadré.
+ */
+function drawRampart(R, hpFrac) {
+  const { cx, cy, w } = view;
+  const y = cy + R + 10;
+  const tint = hpFrac > 0.34 ? game.tierTo : '#ff3d81';
+
+  // Ligne d'horizon, plus dense près du noyau.
+  const grad = ctx.createLinearGradient(0, y, w, y);
+  grad.addColorStop(0, hexToRgba(tint, 0));
+  grad.addColorStop(0.5, hexToRgba(tint, 0.5));
+  grad.addColorStop(1, hexToRgba(tint, 0));
+  ctx.strokeStyle = grad;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(0, y);
+  ctx.lineTo(w, y);
+  ctx.stroke();
+
+  // Empattement : deux jambes obliques jusqu'au sol.
+  ctx.strokeStyle = hexToRgba(tint, 0.55);
+  ctx.lineWidth = 2.2;
+  ctx.beginPath();
+  ctx.moveTo(cx - R * 0.75, cy + R * 0.55);
+  ctx.lineTo(cx - R * 1.5, y);
+  ctx.moveTo(cx + R * 0.75, cy + R * 0.55);
+  ctx.lineTo(cx + R * 1.5, y);
+  ctx.stroke();
+
+  ctx.globalCompositeOperation = 'lighter';
+  drawBlob(cx, y, R * 4.5, tint, 0.12 + game.intensity * 0.1);
   ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = 'source-over';
 }
@@ -2933,6 +3090,28 @@ const AIM_OPTIONS = [
   { id: 'direct', name: 'Directe', hint: 'On vise l\'endroit qu\'on touche. Plus immédiat, mais le doigt gêne.' },
 ];
 
+function modeSelectorHtml() {
+  const buttons = Object.keys(MODES).map((id) => `
+    <button type="button" class="mode-opt" data-mode="${id}"
+      aria-pressed="${gameMode === id}">
+      <span>${MODES[id].name}</span><span class="hint-sm">${MODES[id].hint}</span>
+    </button>`).join('');
+  return `<div class="seg-label">Terrain</div><div class="seg">${buttons}</div>`;
+}
+
+function wireModeSelector() {
+  panel.querySelectorAll('.mode-opt').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      setGameMode(btn.dataset.mode);
+      panel.querySelectorAll('.mode-opt').forEach((b) => {
+        b.setAttribute('aria-pressed', String(b.dataset.mode === gameMode));
+      });
+      audioInit();
+      sfxSwitch();
+    });
+  });
+}
+
 function aimSelectorHtml() {
   const buttons = AIM_OPTIONS.map((o) => `
     <button type="button" class="aim-opt" data-aim="${o.id}"
@@ -3017,6 +3196,7 @@ function showMenu() {
       Les points débloquent des <b>armes qui se cumulent</b>, et les ennemis
       lâchent des <b>bonus</b> à ramasser d'un coup de rayon.
     </div>
+    ${modeSelectorHtml()}
     ${aimSelectorHtml()}
     ${game.best > 0 ? `
       <div class="scores">
@@ -3027,6 +3207,7 @@ function showMenu() {
       </div>` : ''}
     <button type="button" id="btn-primary">Jouer</button>
   `;
+  wireModeSelector();
   wireAimSelector();
   document.getElementById('btn-primary').addEventListener('click', startGame);
 }
@@ -3124,4 +3305,4 @@ showMenu();
 requestAnimationFrame(frame);
 
 /* Poignée de débogage : permet d'inspecter l'état depuis la console. */
-window.VIRGULE = { game, view, input, audio, perf, CFG, ENEMY_TYPES, WEAPONS, BONUSES, COMBO_TIERS };
+window.VIRGULE = { game, view, input, audio, perf, spawnDistance, MODES, CFG, ENEMY_TYPES, WEAPONS, BONUSES, COMBO_TIERS };
