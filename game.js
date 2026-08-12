@@ -30,11 +30,19 @@ const CFG = {
     window: 5,             // secondes sans kill avant que la série retombe
   },
   spawn: {
-    startInterval: 1.25,   // secondes entre deux apparitions au début
-    endInterval: 0.45,     // ... et une fois la difficulté au maximum
-    rampTime: 180,         // secondes pour atteindre le maximum
-    speedRampTime: 280,    // les ennemis gagnent +100% de vitesse sur cette durée
-    hpRampTime: 260,       // ... et +100% de points de vie sur celle-ci
+    hpRampTime: 260,       // les ennemis gagnent +100% de points de vie sur cette durée
+  },
+  /*
+   * Densité. C'est elle, et elle seule, qui porte la montée en difficulté :
+   * les ennemis ne vont jamais plus vite, ils arrivent seulement de plus en
+   * plus serrés. Chaque palier raccourcit l'intervalle d'un facteur fixe, ce
+   * qui donne une progression géométrique — lisible comme un niveau.
+   */
+  density: {
+    levelTime: 10,         // secondes par palier
+    baseInterval: 1.25,    // secondes entre deux apparitions au niveau 1
+    perLevel: 0.88,        // l'intervalle est multiplié par ça à chaque palier
+    minInterval: 0.16,     // plancher, au-delà l'écran devient illisible
   },
   particlesMax: 900,
   ringsMax: 40,
@@ -725,6 +733,8 @@ const game = {
   combo: 0,             // kills enchaînés
   comboTimer: 0,        // temps restant pour prolonger la série
   multiplier: 1,
+  level: 1,             // palier de densité courant
+  levelFlash: 0,        // éclat de l'indicateur au changement de palier
   intensity: 0,         // 0..1, lissé : pilote le fond et les halos
   tierFrom: '#4df3ff',  // fondu enchaîné entre paliers de série
   tierTo: '#4df3ff',
@@ -778,6 +788,8 @@ function resetGame() {
   game.combo = 0;
   game.comboTimer = 0;
   game.multiplier = 1;
+  game.level = 1;
+  game.levelFlash = 0;
   game.intensity = 0;
   game.tierFrom = game.tierTo = COMBO_TIERS[0].color;
   game.tierBlend = 1;
@@ -1115,6 +1127,12 @@ function sfxBuffEnd() {
   tone(420, 0.18, { to: 210, type: 'sine', gain: 0.09 });
 }
 
+/** Palier de densité franchi : deux notes montantes, discrètes. */
+function sfxDensity() {
+  tone(392, 0.14, { type: 'triangle', gain: 0.1 });
+  tone(587, 0.2, { type: 'triangle', gain: 0.09, delay: 0.08 });
+}
+
 function sfxComboBreak() {
   tone(300, 0.26, { to: 110, type: 'triangle', gain: 0.11 });
 }
@@ -1195,8 +1213,26 @@ function vibrate(ms) {
  *  Ennemis
  * ------------------------------------------------------------------ */
 
-function difficulty() {
-  return clamp(game.time / CFG.spawn.rampTime, 0, 1);
+/** Palier de densité courant, à partir de 1. */
+function densityLevel() {
+  return 1 + Math.floor(game.time / CFG.density.levelTime);
+}
+
+/** Avancement dans le palier courant, de 0 à 1. */
+function densityProgress() {
+  return (game.time % CFG.density.levelTime) / CFG.density.levelTime;
+}
+
+/** Secondes entre deux apparitions au palier donné. */
+function densityInterval(level) {
+  const d = CFG.density;
+  return Math.max(d.minInterval, d.baseInterval * Math.pow(d.perLevel, level - 1))
+    * mode().rate;
+}
+
+/** Combien de fois plus d'ennemis qu'au niveau 1 : le coefficient affiché. */
+function densityFactor(level) {
+  return densityInterval(1) / densityInterval(level);
 }
 
 function pickEnemyType() {
@@ -1239,14 +1275,13 @@ function splitEnemy(parent) {
 
 /** Fabrique commune : `spawnEnemy` et `splitEnemy` produisent le même objet. */
 function makeEnemy(def, opts) {
-  const speedMul = 1 + game.time / CFG.spawn.speedRampTime;
   return {
     def,
     x: opts.x,
     y: opts.y,
     hp: opts.hp,
     hpMax: opts.hp,
-    speed: def.speed * speedMul * mode().speedMul * rand(0.9, 1.12),
+    speed: def.speed * mode().speedMul * rand(0.9, 1.12),
     radius: def.radius,
     rot: opts.angle + Math.PI,
     spin: rand(-1.6, 1.6),
@@ -1552,8 +1587,14 @@ function update(dt) {
   if (game.state === STATE.PLAYING) {
     game.time += dt;
 
-    // Cadence d'apparition, de plus en plus rapide.
-    const interval = lerp(CFG.spawn.startInterval, CFG.spawn.endInterval, difficulty()) * mode().rate;
+    const level = densityLevel();
+    if (level !== game.level) {
+      game.level = level;
+      announceDensity(level);
+    }
+
+    // Cadence d'apparition, dictée par le palier de densité.
+    const interval = densityInterval(level);
     game.spawnTimer -= dt;
     if (game.spawnTimer <= 0) {
       spawnEnemy();
@@ -1594,6 +1635,7 @@ function update(dt) {
   game.intensity += (target - game.intensity) * Math.min(1, dt * 2.2);
   game.tierBlend = Math.min(1, game.tierBlend + dt * 1.5);
 
+  game.levelFlash = Math.max(0, game.levelFlash - dt * 1.6);
   game.shake = Math.max(0, game.shake - dt * 42);
   game.coreFlash = Math.max(0, game.coreFlash - dt * 4);
   sparkCooldown = Math.max(0, sparkCooldown - dt);
@@ -2981,6 +3023,8 @@ function drawHud() {
   ctx.font = `700 ${Math.round(28 * s)}px ui-sans-serif, system-ui, sans-serif`;
   ctx.fillText(String(game.score), padX, padY);
 
+  drawDensity(s);
+
   let cursor = 32 + drawCombo(padX, padY + Math.round(32 * s), s);
   cursor += drawPerkChips(padX, padY + Math.round(cursor * s), s);
   drawBuffChips(padX, padY + Math.round(cursor * s), s);
@@ -2990,6 +3034,55 @@ function drawHud() {
   ctx.fillStyle = 'rgba(232,246,255,0.55)';
   ctx.font = `600 ${Math.round(15 * s)}px ui-sans-serif, system-ui, sans-serif`;
   ctx.fillText(formatTime(game.time), view.w / 2, padY + 6);
+}
+
+function announceDensity(level) {
+  game.levelFlash = 1;
+  sfxDensity();
+  shockRing('#8ecae6', view.coreRadius * 3, 0.45, 2);
+}
+
+/**
+ * Indicateur de densité, en haut à droite sous le coupe-son.
+ *
+ * Le niveau donne le repère, le coefficient dit ce qu'il vaut concrètement
+ * (×2,4 = deux fois et demie plus d'ennemis qu'au départ), et la barre montre
+ * ce qu'il reste avant le palier suivant.
+ */
+function drawDensity(s) {
+  const x = view.w - (18 + Math.max(view.safe.left, view.safe.right));
+  const y = view.safe.top + 63;
+  const flash = game.levelFlash;
+  const color = flash > 0.02 ? '#ffffff' : '#8ecae6';
+
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'alphabetic';
+
+  ctx.globalAlpha = 0.5 + flash * 0.5;
+  ctx.fillStyle = 'rgba(232,246,255,0.6)';
+  ctx.font = `700 ${Math.round(8.5 * s)}px ui-sans-serif, system-ui, sans-serif`;
+  ctx.fillText('DENSITÉ', x, y);
+
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = color;
+  ctx.font = `800 ${Math.round(16 * s)}px ui-sans-serif, system-ui, sans-serif`;
+  const niv = `NIV ${game.level}`;
+  ctx.fillText(niv, x, y + 17 * s);
+
+  ctx.fillStyle = hexToRgba('#8ecae6', 0.75);
+  ctx.font = `700 ${Math.round(10.5 * s)}px ui-sans-serif, system-ui, sans-serif`;
+  ctx.fillText(`×${densityFactor(game.level).toFixed(1)}`,
+    x - ctx.measureText(niv).width - 46 * s, y + 16 * s);
+
+  // Barre d'avancement vers le palier suivant.
+  const barW = 62 * s;
+  const barY = y + 23 * s;
+  ctx.fillStyle = hexToRgba('#8ecae6', 0.16);
+  ctx.fillRect(x - barW, barY, barW, 3 * s);
+  ctx.fillStyle = hexToRgba(color, 0.85);
+  ctx.fillRect(x - barW, barY, barW * densityProgress(), 3 * s);
+
+  ctx.textBaseline = 'top';
 }
 
 /**

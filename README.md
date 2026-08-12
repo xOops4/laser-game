@@ -206,8 +206,30 @@ une amélioration déjà à son plafond.
 | Essaim | Carré rouge | À partir de 68 s. Se scinde en trois éclats rapides à sa mort — l'abattre trop près du noyau se paie comptant. |
 | Sentinelle | Chevron bleu pâle | À partir de 88 s. S'arrête à distance et bombarde. Ses projectiles sont lents et **destructibles au rayon**. |
 
-La cadence d'apparition et la vitesse des ennemis montent en continu : pas de
-vagues ni de temps mort.
+## Densité
+
+Les ennemis **ne vont jamais plus vite** : leur vitesse est fixe pour un type
+donné, du début à la fin. Toute la montée en difficulté passe par la densité,
+c'est-à-dire par leur nombre.
+
+Un palier est franchi toutes les 10 secondes et raccourcit l'intervalle
+d'apparition de 12 %, ce qui donne une progression géométrique. Un indicateur
+en haut à droite affiche le niveau, le coefficient — combien de fois plus
+d'ennemis qu'au départ — et une barre d'avancement vers le palier suivant.
+Chaque passage de palier se signale par deux notes montantes.
+
+| Temps | Niveau | Intervalle | Coefficient | Ennemis / 10 s |
+| --- | --- | --- | --- | --- |
+| 0 s | 1 | 1,25 s | ×1,0 | 8 |
+| 40 s | 5 | 0,75 s | ×1,7 | 13 |
+| 90 s | 10 | 0,40 s | ×3,2 | 25 |
+| 120 s | 13 | 0,27 s | ×4,6 | 37 |
+| 170 s | 18 | 0,16 s | ×7,8 | 62 |
+
+L'intervalle bute à 0,16 s, au-delà l'écran devient illisible. À titre de
+comparaison, l'ancien réglage plafonnait à ×2,8 mais accélérait les ennemis de
+64 % en parallèle : le remplacement laisse la difficulté au même niveau — un
+bot qui balaie sans viser meurt à 66 s, contre 67 s auparavant.
 
 Difficulté mesurée sur cinq parties d'un bot qui balaie sans jamais viser :
 quatre morts entre 47 s et 70 s, médiane 67 s, et une survie au-delà de 120 s.
@@ -225,7 +247,7 @@ game.js      tout le jeu : boucle, entrées, ennemis, laser, rendu
 
 Les réglages d'équilibrage sont regroupés en haut de `game.js` dans quatre
 objets : `MODES` (disposition et compensations de chaque terrain), `CFG`
-(noyau, séries, cadence d'apparition, rampes), `COMBO_TIERS`
+(noyau, séries, densité, rampe de points de vie), `COMBO_TIERS`
 (paliers et couleurs, qui pilotent le décor), `WEAPONS` (un bloc
 par arme, avec son palier de déblocage), `BONUSES` + `DROP` (effets et taux de
 chute) et `ENEMY_TYPES` (un bloc par type d'ennemi). Tout se règle là, sans
