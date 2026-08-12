@@ -218,18 +218,35 @@ en haut à droite affiche le niveau, le coefficient — combien de fois plus
 d'ennemis qu'au départ — et une barre d'avancement vers le palier suivant.
 Chaque passage de palier se signale par deux notes montantes.
 
-| Temps | Niveau | Intervalle | Coefficient | Ennemis / 10 s |
-| --- | --- | --- | --- | --- |
-| 0 s | 1 | 1,25 s | ×1,0 | 8 |
-| 40 s | 5 | 0,75 s | ×1,7 | 13 |
-| 90 s | 10 | 0,40 s | ×3,2 | 25 |
-| 120 s | 13 | 0,27 s | ×4,6 | 37 |
-| 170 s | 18 | 0,16 s | ×7,8 | 62 |
+| Temps | Niveau | Intervalle | Coefficient |
+| --- | --- | --- | --- |
+| 0 s | 1 | 1,25 s | ×1 |
+| 90 s | 10 | 0,40 s | ×3 |
+| 190 s | 20 | 0,11 s | ×11 |
+| 290 s | 30 | 0,031 s | ×40 |
 
-L'intervalle bute à 0,16 s, au-delà l'écran devient illisible. À titre de
-comparaison, l'ancien réglage plafonnait à ×2,8 mais accélérait les ennemis de
-64 % en parallèle : le remplacement laisse la difficulté au même niveau — un
-bot qui balaie sans viser meurt à 66 s, contre 67 s auparavant.
+**La progression n'a pas de plafond.** Deux garde-fous naturels suffisent : une
+seule apparition par image, donc 60 par seconde au maximum quoi qu'il arrive,
+et un plafond de 260 ennemis vivants simultanément.
+
+## Recul de caméra
+
+Tous les dix paliers, la caméra recule d'un cran — ×0,84, puis ×0,71, puis
+×0,60 où elle s'arrête. Les ennemis paraissent plus petits mais **on les voit
+venir de bien plus loin**, ce qui rend la densité croissante tenable. Le rayon
+du monde passe ainsi de 445 à 733 unités pendant que l'écran, lui, ne change
+pas.
+
+Le recul s'arrête à ×0,60 parce qu'au-delà les ennemis deviendraient trop
+petits pour être lus : un grunt y mesure déjà 7,8 px de rayon contre 13 au
+départ. Le recul est purement visuel — les distances de collision, elles, sont
+inchangées — et il s'anime sur environ une seconde, annoncé par un bandeau
+pour qu'un écran qui s'éloigne ne passe pas pour un défaut d'affichage.
+
+Deux détails d'implémentation : les chiffres de dégâts compensent le recul
+pour garder une taille constante à l'écran, et le décor de fond raisonne en
+pixels d'écran plutôt qu'en unités du monde, puisqu'il est peint hors de la
+transformation.
 
 Difficulté mesurée sur cinq parties d'un bot qui balaie sans jamais viser :
 quatre morts entre 47 s et 70 s, médiane 67 s, et une survie au-delà de 120 s.
@@ -247,7 +264,7 @@ game.js      tout le jeu : boucle, entrées, ennemis, laser, rendu
 
 Les réglages d'équilibrage sont regroupés en haut de `game.js` dans quatre
 objets : `MODES` (disposition et compensations de chaque terrain), `CFG`
-(noyau, séries, densité, rampe de points de vie), `COMBO_TIERS`
+(noyau, séries, densité, recul, rampe de points de vie), `COMBO_TIERS`
 (paliers et couleurs, qui pilotent le décor), `WEAPONS` (un bloc
 par arme, avec son palier de déblocage), `BONUSES` + `DROP` (effets et taux de
 chute) et `ENEMY_TYPES` (un bloc par type d'ennemi). Tout se règle là, sans

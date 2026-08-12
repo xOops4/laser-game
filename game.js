@@ -42,7 +42,22 @@ const CFG = {
     levelTime: 10,         // secondes par palier
     baseInterval: 1.25,    // secondes entre deux apparitions au niveau 1
     perLevel: 0.88,        // l'intervalle est multiplié par ça à chaque palier
-    minInterval: 0.16,     // plancher, au-delà l'écran devient illisible
+    // Aucun plancher : la densité monte indéfiniment. Deux garde-fous
+    // naturels suffisent — une seule apparition par image (donc 60 par
+    // seconde au maximum) et un plafond d'ennemis vivants.
+    maxAlive: 260,
+  },
+  /*
+   * Dézoom. Tous les dix paliers, la caméra recule d'un cran : les ennemis
+   * paraissent plus petits mais on les voit venir de bien plus loin, ce qui
+   * rend la densité croissante tenable. Le recul s'arrête à `min` — au-delà
+   * les ennemis deviendraient trop petits pour être lus.
+   */
+  zoom: {
+    everyLevels: 10,
+    step: 0.84,
+    min: 0.6,
+    ease: 1.1,             // vitesse du recul, en fraction par seconde
   },
   particlesMax: 900,
   ringsMax: 40,
@@ -394,7 +409,10 @@ const soundBtn = document.getElementById('sound');
 const view = {
   w: 0, h: 0,           // taille en px CSS
   cx: 0, cy: 0,         // centre
-  spawnRadius: 0,       // les ennemis naissent juste hors champ
+  spawnRadius: 0,       // distance d'apparition, en unités du monde
+  baseRadius: 0,        // rayon visible en pixels d'écran, indépendant du recul
+  viewRadius: 0,        // idem, pour le décor peint hors du recul
+  zoom: 1,              // recul de caméra : 1 = vue rapprochée
   coreRadius: 0,
   scale: 1,             // facteur d'échelle de l'UI selon la taille d'écran
   safe: { top: 0, right: 0, bottom: 0, left: 0 },
@@ -483,12 +501,14 @@ function resize() {
     // Posé en bas, juste au-dessus de la barre d'armes.
     view.cy = h - (safeBottom + 104);
     // Le point visible le plus éloigné est un coin haut.
-    view.spawnRadius = Math.hypot(w / 2, view.cy) + 60;
+    view.baseRadius = Math.hypot(w / 2, view.cy) + 60;
   } else {
     view.cy = h / 2;
     // Le coin le plus éloigné du centre, plus une marge.
-    view.spawnRadius = Math.hypot(w, h) / 2 + 60;
+    view.baseRadius = Math.hypot(w, h) / 2 + 60;
   }
+  view.viewRadius = view.baseRadius;
+  applyZoom();
 
   view.coreRadius = clamp(
     Math.min(w, h) * CFG.core.radiusFactor,
@@ -664,15 +684,15 @@ function drawBackground(dt) {
   // Teinte de fond : bleu profond au repos, virant lentement au violet à
   // mesure que la partie dure — deux parties longues ne se ressemblent pas.
   const base = game.time < 100 ? '#0e2a6b' : '#3a1b6e';
-  drawBlobOn(g, cx * k, cy * k, view.spawnRadius * 1.1 * k, base, 0.1 + heat * 0.06);
+  drawBlobOn(g, cx * k, cy * k, view.viewRadius * 1.1 * k, base, 0.1 + heat * 0.06);
 
   for (const n of nebula) {
     n.angle += n.drift * dt * (1 + heat * 1.6);
-    const r = view.spawnRadius * n.dist;
+    const r = view.viewRadius * n.dist;
     const x = (cx + Math.cos(n.angle) * r) * k;
     const y = (cy + Math.sin(n.angle) * r) * k;
     const breathe = 1 + Math.sin(game.corePulse * 0.6 + n.phase) * 0.12;
-    const size = view.spawnRadius * n.size * breathe * k;
+    const size = view.viewRadius * n.size * breathe * k;
     const alpha = 0.05 + heat * 0.17;
 
     // Fondu enchaîné entre l'ancien palier et le nouveau.
@@ -696,7 +716,7 @@ function drawGrid(heat) {
   ctx.lineWidth = 1;
   const step = Math.max(70, Math.min(view.w, view.h) / 5);
   const breathe = 1 + Math.sin(game.corePulse * 1.6) * 0.012 * (0.3 + heat);
-  for (let r = view.coreRadius + step; r < view.spawnRadius; r += step) {
+  for (let r = view.coreRadius + step; r < view.viewRadius; r += step) {
     ctx.beginPath();
     ctx.arc(cx, cy, r * breathe, 0, TAU);
     ctx.stroke();
@@ -713,7 +733,7 @@ function drawGrid(heat) {
     const uy = Math.sin(a);
     ctx.beginPath();
     ctx.moveTo(cx + ux * view.coreRadius * 1.6, cy + uy * view.coreRadius * 1.6);
-    ctx.lineTo(cx + ux * view.spawnRadius, cy + uy * view.spawnRadius);
+    ctx.lineTo(cx + ux * view.viewRadius, cy + uy * view.viewRadius);
     ctx.stroke();
   }
 }
@@ -790,6 +810,8 @@ function resetGame() {
   game.multiplier = 1;
   game.level = 1;
   game.levelFlash = 0;
+  view.zoom = 1;
+  applyZoom();
   game.intensity = 0;
   game.tierFrom = game.tierTo = COMBO_TIERS[0].color;
   game.tierBlend = 1;
@@ -1223,11 +1245,36 @@ function densityProgress() {
   return (game.time % CFG.density.levelTime) / CFG.density.levelTime;
 }
 
-/** Secondes entre deux apparitions au palier donné. */
+/** Secondes entre deux apparitions au palier donné. Sans plancher. */
 function densityInterval(level) {
   const d = CFG.density;
-  return Math.max(d.minInterval, d.baseInterval * Math.pow(d.perLevel, level - 1))
-    * mode().rate;
+  return d.baseInterval * Math.pow(d.perLevel, level - 1) * mode().rate;
+}
+
+/** Recul de caméra visé au palier donné. */
+function zoomFor(level) {
+  const z = CFG.zoom;
+  const steps = Math.floor((level - 1) / z.everyLevels);
+  return Math.max(z.min, Math.pow(z.step, steps));
+}
+
+/**
+ * Recalcule la géométrie qui dépend du recul. `baseRadius` est le rayon
+ * visible en pixels d'écran ; le diviser par le zoom donne la distance
+ * correspondante dans le monde, donc l'endroit où faire naître les ennemis.
+ */
+function applyZoom() {
+  view.spawnRadius = view.baseRadius / view.zoom;
+}
+
+function updateZoom(dt) {
+  const target = zoomFor(game.level);
+  if (Math.abs(view.zoom - target) < 0.001) {
+    if (view.zoom !== target) { view.zoom = target; applyZoom(); }
+    return;
+  }
+  view.zoom += (target - view.zoom) * Math.min(1, dt * CFG.zoom.ease);
+  applyZoom();
 }
 
 /** Combien de fois plus d'ennemis qu'au niveau 1 : le coefficient affiché. */
@@ -1597,7 +1644,7 @@ function update(dt) {
     const interval = densityInterval(level);
     game.spawnTimer -= dt;
     if (game.spawnTimer <= 0) {
-      spawnEnemy();
+      if (game.enemies.length < CFG.density.maxAlive) spawnEnemy();
       game.spawnTimer += interval * rand(0.75, 1.25);
     }
 
@@ -1619,6 +1666,7 @@ function update(dt) {
     }
   }
 
+  updateZoom(dt);
   updateChainArcs(dt);
   updateDamageText(dt);
   updateDelayed(dt);
@@ -2023,6 +2071,14 @@ function fireBeams(w, dt) {
   const damage = rate * dt;
   const burst = rate * DAMAGE_TEXT.tick;
 
+  /*
+   * Instantané de la liste. Un rayon qui tue déclenche une détonation, qui
+   * retire d'autres ennemis au milieu du tableau : parcourir `game.enemies`
+   * par index finissait par lire au-delà de sa nouvelle longueur. Les morts
+   * restés dans l'instantané sont sans effet, `hitEnemy` les ignore.
+   */
+  const list = game.enemies.slice();
+
   for (const offset of beamOffsets(w)) {
     const angle = beamAngleFor(offset);
     const ux = Math.cos(angle);
@@ -2031,8 +2087,8 @@ function fireBeams(w, dt) {
     let nearest = null;       // seulement utile aux armes sans perçage
     let nearestAlong = Infinity;
 
-    for (let i = game.enemies.length - 1; i >= 0; i--) {
-      const e = game.enemies[i];
+    for (const e of list) {
+      if (e.hp <= 0) continue;                  // abattu entre-temps
       const dx = e.x - view.cx;
       const dy = e.y - view.cy;
 
@@ -2312,7 +2368,8 @@ function updateDamageText(dt) {
 function drawDamageText() {
   if (!game.damageText.length) return;
 
-  const s = view.scale;
+  // Divisé par le recul : les chiffres gardent leur taille à l'écran.
+  const s = view.scale / view.zoom;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.lineJoin = 'round';
@@ -2320,7 +2377,7 @@ function drawDamageText() {
   for (const d of game.damageText) {
     const t = 1 - d.life / d.maxLife;
     // Montée qui décélère, puis effacement sur le dernier tiers.
-    const y = d.y - DAMAGE_TEXT.rise * (1 - (1 - t) * (1 - t));
+    const y = d.y - (DAMAGE_TEXT.rise / view.zoom) * (1 - (1 - t) * (1 - t));
     const x = d.x + d.drift * t;
     const alpha = t < 0.65 ? 1 : 1 - (t - 0.65) / 0.35;
 
@@ -2398,6 +2455,14 @@ function render(dt) {
   // Tremblement d'écran
   if (game.shake > 0.2) {
     ctx.translate(rand(-game.shake, game.shake), rand(-game.shake, game.shake));
+  }
+
+  // Recul de caméra, centré sur le noyau : tout ce qui suit est dessiné en
+  // unités du monde, et l'angle de visée reste donc inchangé.
+  if (view.zoom !== 1) {
+    ctx.translate(view.cx, view.cy);
+    ctx.scale(view.zoom, view.zoom);
+    ctx.translate(-view.cx, -view.cy);
   }
 
   drawStars();
@@ -2950,20 +3015,21 @@ function drawStick() {
  * centré qu'on aurait mal cadré.
  */
 function drawRampart(R, hpFrac) {
-  const { cx, cy, w } = view;
+  const { cx, cy } = view;
+  const w = view.w / view.zoom;   // le socle barre l'écran quel que soit le recul
   const y = cy + R + 10;
   const tint = hpFrac > 0.34 ? game.tierTo : '#ff3d81';
 
   // Ligne d'horizon, plus dense près du noyau.
-  const grad = ctx.createLinearGradient(0, y, w, y);
+  const grad = ctx.createLinearGradient(cx - w / 2, y, cx + w / 2, y);
   grad.addColorStop(0, hexToRgba(tint, 0));
   grad.addColorStop(0.5, hexToRgba(tint, 0.5));
   grad.addColorStop(1, hexToRgba(tint, 0));
   ctx.strokeStyle = grad;
   ctx.lineWidth = 1.5;
   ctx.beginPath();
-  ctx.moveTo(0, y);
-  ctx.lineTo(w, y);
+  ctx.moveTo(cx - w / 2, y);
+  ctx.lineTo(cx + w / 2, y);
   ctx.stroke();
 
   // Empattement : deux jambes obliques jusqu'au sol.
@@ -3040,6 +3106,14 @@ function announceDensity(level) {
   game.levelFlash = 1;
   sfxDensity();
   shockRing('#8ecae6', view.coreRadius * 3, 0.45, 2);
+
+  // Tous les dix paliers la caméra recule : ça mérite d'être annoncé, sinon
+  // l'écran qui s'éloigne passe pour un bug d'affichage.
+  if (zoomFor(level) < zoomFor(level - 1)) {
+    showBanner('ZONE ÉLARGIE', `Niveau ${level} — tu vois venir de plus loin`, '#8ecae6');
+    shockRing('#8ecae6', view.viewRadius * 0.8, 0.9, 3);
+    sfxUnlock();
+  }
 }
 
 /**
@@ -3071,8 +3145,11 @@ function drawDensity(s) {
 
   ctx.fillStyle = hexToRgba('#8ecae6', 0.75);
   ctx.font = `700 ${Math.round(10.5 * s)}px ui-sans-serif, system-ui, sans-serif`;
-  ctx.fillText(`×${densityFactor(game.level).toFixed(1)}`,
-    x - ctx.measureText(niv).width - 46 * s, y + 16 * s);
+  // Une décimale tant que c'est utile, puis l'entier : ×46,3 devient illisible
+  // et n'apprend rien de plus que ×46.
+  const f = densityFactor(game.level);
+  ctx.fillText(`×${f < 10 ? f.toFixed(1) : Math.round(f)}`,
+    x - ctx.measureText(niv).width - 44 * s, y + 16 * s);
 
   // Barre d'avancement vers le palier suivant.
   const barW = 62 * s;
@@ -3508,4 +3585,4 @@ showMenu();
 requestAnimationFrame(frame);
 
 /* Poignée de débogage : permet d'inspecter l'état depuis la console. */
-window.VIRGULE = { game, view, input, audio, perf, spawnDistance, MODES, CFG, ENEMY_TYPES, WEAPONS, BONUSES, COMBO_TIERS };
+window.VIRGULE = { game, view, input, audio, perf, spawnDistance, densityInterval, zoomFor, MODES, CFG, ENEMY_TYPES, WEAPONS, BONUSES, COMBO_TIERS };
