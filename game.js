@@ -15,9 +15,9 @@
 const CFG = {
   core: {
     hpMax: 120,
-    radiusFactor: 0.058,   // fraction de la plus petite dimension de l'écran
-    radiusMin: 24,
-    radiusMax: 46,
+    radiusFactor: 0.046,   // fraction de la plus petite dimension de l'écran
+    radiusMin: 20,
+    radiusMax: 38,
   },
   aim: {
     deadzone: 14,          // px avant que le manche virtuel prenne la main
@@ -72,7 +72,7 @@ const WEAPONS = [
   },
   {
     id: 'orbit', name: 'Orbiteurs', unlock: 2100, color: '#c9a3ff',
-    kind: 'orbit', count: 3, dps: 62, range: 0.4, spin: 0.85, orbit: 2.7,
+    kind: 'orbit', count: 3, dps: 62, range: 0.4, spin: 0.85, orbit: 3.2,
     blurb: 'Trois satellites qui tirent tout seuls, même doigt levé.',
   },
   {
@@ -86,6 +86,14 @@ const WEAPONS = [
     id: 'chain', name: 'Foudre', unlock: 7000, color: '#e8ff5a',
     kind: 'chain', interval: 0.55, damage: 46, range: 0.34, hops: 4, hopRange: 150,
     blurb: 'Un arc qui saute d\'un ennemi à l\'autre, tout seul.',
+  },
+  {
+    // Orbite large, exprimée en fraction du rayon d'apparition : les mines
+    // interceptent loin du noyau, quelle que soit la taille de l'écran.
+    id: 'mines', name: 'Mines', unlock: 11000, color: '#ff9505',
+    kind: 'mine', count: 5, orbitFactor: 0.36, spin: -0.28,
+    radius: 9, damage: 135, blast: 84, respawn: 3.4,
+    blurb: 'Cinq mines en orbite lointaine. Elles sautent au contact.',
   },
 ];
 
@@ -196,6 +204,36 @@ const ENEMY_TYPES = {
   tank: {
     hp: 135, speed: 24, radius: 22, damage: 22, score: 40,
     color: '#b06cff', shape: 'hex', orient: 'spin', unlock: 42, weight: 4,
+  },
+
+  /* Le Rôdeur ne fonce pas : il s'enroule vers le noyau, ce qui le fait
+     glisser hors d'un rayon tenu droit. */
+  prowler: {
+    hp: 44, speed: 62, radius: 12, damage: 12, score: 25,
+    color: '#17c3b2', shape: 'pentagon', orient: 'aim', unlock: 50, weight: 6,
+    move: 'spiral', swirl: 0.75,
+  },
+
+  /* L'Essaim se scinde en trois à sa mort : le tuer trop près du noyau se
+     paie comptant. */
+  swarm: {
+    hp: 60, speed: 40, radius: 16, damage: 14, score: 30,
+    color: '#e5484d', shape: 'square', orient: 'spin', unlock: 68, weight: 5,
+    splitInto: 'mote', splitCount: 3,
+  },
+  mote: {
+    hp: 12, speed: 96, radius: 7, damage: 5, score: 8,
+    color: '#e5484d', shape: 'triangle', orient: 'aim',
+    unlock: Infinity, weight: 0,   // jamais tiré au sort, seulement issu d'un Essaim
+  },
+
+  /* La Sentinelle s'arrête à distance et bombarde. Ses projectiles sont
+     lents et destructibles : on peut les abattre au rayon. */
+  sentinel: {
+    hp: 70, speed: 46, radius: 14, damage: 10, score: 35,
+    color: '#8ecae6', shape: 'chevron', orient: 'aim', unlock: 88, weight: 4,
+    move: 'stopper', standRange: 0.36, fireInterval: 2.4,
+    shotDamage: 8, shotSpeed: 132, shotRadius: 5,
   },
 };
 
@@ -571,6 +609,9 @@ const game = {
   unlocked: [true],     // un booléen par arme ; les armes se cumulent
   buffs: {},            // id de bonus -> secondes restantes
   orbitAngle: 0,        // phase de rotation des satellites
+  mineAngle: 0,         // phase de rotation des mines
+  mines: [],            // une entrée par emplacement : { cooldown }
+  shots: [],            // projectiles des Sentinelles
   orbitShots: [],       // tirs des satellites, recalculés à chaque image
   chainTimer: 0,        // compte à rebours du prochain arc de foudre
   chainArcs: [],        // arcs en cours d'affichage
@@ -620,6 +661,9 @@ function resetGame() {
   game.buffs = {};
   game.orbitAngle = 0;
   game.orbitShots.length = 0;
+  game.mineAngle = 0;
+  game.mines.length = 0;
+  game.shots.length = 0;
   game.chainTimer = 0;
   game.chainArcs.length = 0;
   game.delayed.length = 0;
@@ -914,10 +958,23 @@ function sfxKill(enemy) {
   });
 }
 
-function sfxCoreHit(enemy) {
+function sfxCoreHit(damage) {
   noiseBurst(0.4, { type: 'lowpass', freq: 900, freqTo: 70, gain: 0.36 });
   tone(110, 0.3, { to: 38, type: 'sine', gain: 0.34 });
-  if (enemy.def.damage >= 20) tone(70, 0.45, { to: 30, type: 'sine', gain: 0.3 });
+  if (damage >= 20) tone(70, 0.45, { to: 30, type: 'sine', gain: 0.3 });
+}
+
+/** Mine : une déflagration franche, plus sèche qu'une mort d'ennemi. */
+function sfxMine() {
+  noiseBurst(0.45, { type: 'lowpass', freq: 2200, freqTo: 70, gain: 0.34 });
+  tone(150, 0.36, { to: 34, type: 'triangle', gain: 0.3 });
+  tone(70, 0.5, { to: 28, type: 'sine', gain: 0.24, delay: 0.02 });
+}
+
+/** Tir de Sentinelle : un souffle court et sourd, volontairement discret. */
+function sfxShot() {
+  tone(300, 0.16, { to: 180, type: 'square', gain: 0.07 });
+  noiseBurst(0.12, { type: 'bandpass', freq: 900, gain: 0.07, q: 2 });
 }
 
 function sfxPickup() {
@@ -1034,28 +1091,58 @@ function pickEnemyType() {
   return ENEMY_TYPES.grunt;
 }
 
-function spawnEnemy() {
-  const def = pickEnemyType();
-  const angle = Math.random() * TAU;
-  const speedMul = 1 + game.time / CFG.spawn.speedRampTime;
-  // Les armes se cumulant, les ennemis s'endurcissent pour que la fin de
-  // partie garde du mordant. +100 % de PV au bout de trois minutes.
-  const hp = def.hp * (1 + game.time / CFG.spawn.hpRampTime);
+/** Un Essaim abattu se disperse en éclats vivants autour de sa position. */
+function splitEnemy(parent) {
+  const def = ENEMY_TYPES[parent.def.splitInto];
+  const hpScale = 1 + game.time / CFG.spawn.hpRampTime;
 
-  game.enemies.push({
+  for (let i = 0; i < parent.def.splitCount; i++) {
+    const a = (i / parent.def.splitCount) * TAU + Math.random();
+    const hp = def.hp * hpScale;
+    game.enemies.push(makeEnemy(def, {
+      x: parent.x + Math.cos(a) * (parent.radius + 6),
+      y: parent.y + Math.sin(a) * (parent.radius + 6),
+      hp,
+      angle: a,
+    }));
+  }
+  shockRingAt(parent.x, parent.y, def.color, parent.radius * 3, 0.3, 2);
+}
+
+/** Fabrique commune : `spawnEnemy` et `splitEnemy` produisent le même objet. */
+function makeEnemy(def, opts) {
+  const speedMul = 1 + game.time / CFG.spawn.speedRampTime;
+  return {
     def,
-    x: view.cx + Math.cos(angle) * view.spawnRadius,
-    y: view.cy + Math.sin(angle) * view.spawnRadius,
-    hp,
-    hpMax: hp,
+    x: opts.x,
+    y: opts.y,
+    hp: opts.hp,
+    hpMax: opts.hp,
     speed: def.speed * speedMul * rand(0.9, 1.12),
     radius: def.radius,
-    rot: angle + Math.PI,
+    rot: opts.angle + Math.PI,
     spin: rand(-1.6, 1.6),
     seed: Math.random() * TAU,
     trail: rand(0, 0.055),
+    spiralDir: Math.random() < 0.5 ? -1 : 1,
+    fireTimer: def.fireInterval ? rand(0.6, def.fireInterval) : 0,
     flash: 0,
-  });
+  };
+}
+
+function spawnEnemy() {
+  const def = pickEnemyType();
+  const angle = Math.random() * TAU;
+  // Les armes se cumulant, les ennemis s'endurcissent pour que la fin de
+  // partie garde du mordant. +100 % de PV au bout de 260 s.
+  const hp = def.hp * (1 + game.time / CFG.spawn.hpRampTime);
+
+  game.enemies.push(makeEnemy(def, {
+    x: view.cx + Math.cos(angle) * view.spawnRadius,
+    y: view.cy + Math.sin(angle) * view.spawnRadius,
+    hp,
+    angle,
+  }));
 }
 
 function killEnemy(enemy) {
@@ -1111,6 +1198,7 @@ function killEnemy(enemy) {
 
   sfxKill(enemy);
   maybeDropBonus(enemy);
+  if (enemy.def.splitInto) splitEnemy(enemy);
   if (game.multiplier >= DETONATE.fromTier) detonate(enemy, tier);
 
   if (game.multiplier > before) comboTierUp(before);
@@ -1335,8 +1423,11 @@ function update(dt) {
     }
 
     game.orbitAngle += dt * WEAPONS.find((w) => w.kind === 'orbit').spin;
+    game.mineAngle += dt * WEAPONS.find((w) => w.kind === 'mine').spin;
     updateEnemies(dt);
+    updateShots(dt);
     fireAll(dt);
+    shootDownShots();
     updatePickups(dt);
     updateBuffs(dt);
     updateCombo(dt);
@@ -1386,8 +1477,34 @@ function updateEnemies(dt) {
     const dy = view.cy - e.y;
     const dist = Math.hypot(dx, dy) || 1;
 
-    e.x += (dx / dist) * e.speed * speedMul * dt;
-    e.y += (dy / dist) * e.speed * speedMul * dt;
+    const ux = dx / dist;
+    const uy = dy / dist;
+    const v = e.speed * speedMul;
+
+    if (e.def.move === 'spiral') {
+      // Composante tangentielle : l'ennemi s'enroule au lieu de foncer, ce
+      // qui le fait glisser hors d'un rayon tenu immobile.
+      const swirl = e.def.swirl * e.spiralDir;
+      e.x += (ux - uy * swirl) * v * dt;
+      e.y += (uy + ux * swirl) * v * dt;
+    } else if (e.def.move === 'stopper') {
+      const stand = view.spawnRadius * e.def.standRange;
+      if (dist > stand) {
+        e.x += ux * v * dt;
+        e.y += uy * v * dt;
+      } else {
+        // En position : la Sentinelle se contente de bombarder.
+        e.fireTimer -= dt;
+        if (e.fireTimer <= 0) {
+          e.fireTimer = e.def.fireInterval;
+          spawnShot(e);
+        }
+      }
+    } else {
+      e.x += ux * v * dt;
+      e.y += uy * v * dt;
+    }
+
     e.flash = Math.max(0, e.flash - dt * 12);
 
     // Traînée de réacteur. Coupée quand l'écran se remplit, pour tenir le budget.
@@ -1420,19 +1537,24 @@ function updateEnemies(dt) {
 }
 
 function hitCore(enemy) {
-  game.hp -= enemy.def.damage;
+  hitCoreBy(enemy.def.damage, enemy.x, enemy.y, enemy.def.color);
+}
+
+/** Un ennemi au contact, ou un projectile de Sentinelle : même encaissement. */
+function hitCoreBy(damage, x, y, color) {
+  game.hp -= damage;
   breakCombo();
-  game.shake = Math.min(22, 8 + enemy.def.damage * 0.4);
+  game.shake = Math.min(22, 8 + damage * 0.4);
   game.coreFlash = 1;
 
-  shards(enemy.x, enemy.y, '#ffffff', 16, 1.4);
-  shards(enemy.x, enemy.y, enemy.def.color, 10, 1.1);
-  embers(enemy.x, enemy.y, '#ff3d81', 8);
+  shards(x, y, '#ffffff', 16, 1.4);
+  shards(x, y, color, 10, 1.1);
+  embers(x, y, '#ff3d81', 8);
   shockRing('#ff3d81', view.coreRadius * 4.6, 0.5, 4);
-  addFlash(view.cx, view.cy, view.coreRadius * 4.5, '#ff3d81', 0.45);
+  addFlash(view.cx, view.cy, view.coreRadius * 5.4, '#ff3d81', 0.45);
 
-  vibrate(enemy.def.damage >= 20 ? 55 : 30);
-  sfxCoreHit(enemy);
+  vibrate(damage >= 20 ? 55 : 30);
+  sfxCoreHit(damage);
 
   if (game.hp <= 0) {
     game.hp = 0;
@@ -1504,6 +1626,7 @@ function fireAll(dt) {
     // Satellites et foudre se battent seuls ; les rayons attendent le doigt.
     if (w.kind === 'orbit') fireOrbiters(w, dt);
     else if (w.kind === 'chain') fireChain(w, dt);
+    else if (w.kind === 'mine') updateMines(w, dt);
     else if (input.active && input.hasAngle) fireBeams(w, dt);
   }
 }
@@ -1553,6 +1676,146 @@ function fireChain(w, dt) {
   sfxChain(points.length - 1);
 
   for (const e of hit) hitEnemy(e, damage, 0, -1);
+}
+
+/**
+ * Les mines occupent des emplacements fixes sur une orbite large qui tourne
+ * lentement. Une mine prête saute au contact du premier ennemi qui l'effleure,
+ * puis son emplacement se recharge — c'est un champ défensif, pas une arme
+ * qu'on dirige.
+ */
+function updateMines(w, dt) {
+  const orbitR = view.spawnRadius * w.orbitFactor;
+  if (game.mines.length !== w.count) {
+    game.mines = Array.from({ length: w.count }, () => ({ cooldown: 0 }));
+  }
+
+  for (let i = 0; i < w.count; i++) {
+    const mine = game.mines[i];
+    if (mine.cooldown > 0) { mine.cooldown -= dt; continue; }
+
+    const a = game.mineAngle + (i / w.count) * TAU;
+    const mx = view.cx + Math.cos(a) * orbitR;
+    const my = view.cy + Math.sin(a) * orbitR;
+
+    for (const e of game.enemies) {
+      if (Math.hypot(e.x - mx, e.y - my) > w.radius + e.radius) continue;
+      mine.cooldown = w.respawn;
+      explodeMine(mx, my, w);
+      break;
+    }
+  }
+}
+
+function explodeMine(x, y, w) {
+  const damage = w.damage * damageMultiplier();
+
+  // Instantané avant de frapper : les morts en chaîne modifient la liste.
+  const near = game.enemies.filter(
+    (e) => Math.hypot(e.x - x, e.y - y) <= w.blast + e.radius);
+  for (const e of near) {
+    const d = Math.hypot(e.x - x, e.y - y) || 1;
+    hitEnemy(e, damage, (e.x - x) / d, (e.y - y) / d);
+  }
+
+  // Le souffle emporte aussi les projectiles qui traînent.
+  for (let i = game.shots.length - 1; i >= 0; i--) {
+    const sh = game.shots[i];
+    if (Math.hypot(sh.x - x, sh.y - y) <= w.blast) game.shots.splice(i, 1);
+  }
+
+  shockRingAt(x, y, w.color, w.blast, 0.42, 4);
+  addFlash(x, y, w.blast * 1.1, '#ffffff', 0.26);
+  addFlash(x, y, w.blast * 1.5, w.color, 0.42);
+  shards(x, y, w.color, 26, 1.6);
+  burst(x, y, '#ffffff', 18, 1.4);
+  embers(x, y, w.color, 12);
+  game.shake = Math.max(game.shake, 11);
+  screenFlash(w.color, 0.18);
+  sfxMine();
+}
+
+/* ------------------------------------------------------------------ *
+ *  Projectiles ennemis
+ * ------------------------------------------------------------------ */
+
+function spawnShot(enemy) {
+  const def = enemy.def;
+  const dx = view.cx - enemy.x;
+  const dy = view.cy - enemy.y;
+  const d = Math.hypot(dx, dy) || 1;
+
+  game.shots.push({
+    x: enemy.x, y: enemy.y,
+    vx: (dx / d) * def.shotSpeed,
+    vy: (dy / d) * def.shotSpeed,
+    radius: def.shotRadius,
+    damage: def.shotDamage,
+    color: def.color,
+    spin: 0,
+  });
+  addFlash(enemy.x, enemy.y, enemy.radius * 2, def.color, 0.16);
+  sfxShot();
+}
+
+function updateShots(dt) {
+  for (let i = game.shots.length - 1; i >= 0; i--) {
+    const sh = game.shots[i];
+    sh.x += sh.vx * dt;
+    sh.y += sh.vy * dt;
+    sh.spin += dt * 6;
+
+    const dist = Math.hypot(sh.x - view.cx, sh.y - view.cy);
+    if (dist < view.coreRadius + sh.radius) {
+      game.shots.splice(i, 1);
+      hitCoreBy(sh.damage, sh.x, sh.y, sh.color);
+      continue;
+    }
+    // Un projectile qui a dépassé l'écran ne reviendra pas.
+    if (dist > view.spawnRadius + 80) game.shots.splice(i, 1);
+  }
+}
+
+/** Un rayon en service abat-il ce projectile ? */
+function shootDownShots() {
+  if (!input.active || !input.hasAngle) return;
+  for (let i = game.shots.length - 1; i >= 0; i--) {
+    const sh = game.shots[i];
+    if (!beamTouches(sh.x, sh.y, sh.radius + 6)) continue;
+    game.shots.splice(i, 1);
+    burst(sh.x, sh.y, sh.color, 10, 1);
+    addFlash(sh.x, sh.y, 26, '#ffffff', 0.16);
+    sfxHit();
+  }
+}
+
+function drawShots() {
+  if (!game.shots.length) return;
+
+  ctx.globalCompositeOperation = 'lighter';
+  for (const sh of game.shots) {
+    drawBlob(sh.x, sh.y, sh.radius * 3.2, sh.color, 0.5);
+  }
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+
+  for (const sh of game.shots) {
+    ctx.save();
+    ctx.translate(sh.x, sh.y);
+    ctx.rotate(sh.spin);
+    ctx.beginPath();
+    ctx.moveTo(0, -sh.radius);
+    ctx.lineTo(sh.radius, 0);
+    ctx.lineTo(0, sh.radius);
+    ctx.lineTo(-sh.radius, 0);
+    ctx.closePath();
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+    ctx.strokeStyle = sh.color;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.restore();
+  }
 }
 
 function updateChainArcs(dt) {
@@ -1880,6 +2143,7 @@ function render(dt) {
   }
 
   drawPickups();
+  drawShots();
   drawEnemies();
 
   if (game.hp > 0) {
@@ -1969,7 +2233,61 @@ function drawWeapon() {
   }
 
   drawOrbiters();
+  drawMines();
   drawChainArcs();
+}
+
+/**
+ * Mines : un point vif cerclé quand elles sont armées, un arc de recharge
+ * qui se referme quand elles ne le sont pas. On voit donc d'un coup d'œil
+ * quel secteur de l'orbite est encore protégé.
+ */
+function drawMines() {
+  const idx = WEAPONS.findIndex((w) => w.kind === 'mine');
+  if (!isArmed(idx) || !game.mines.length) return;
+
+  const w = WEAPONS[idx];
+  const orbitR = view.spawnRadius * w.orbitFactor;
+  const r = w.radius;
+
+  for (let i = 0; i < game.mines.length; i++) {
+    const mine = game.mines[i];
+    const a = game.mineAngle + (i / game.mines.length) * TAU;
+    const x = view.cx + Math.cos(a) * orbitR;
+    const y = view.cy + Math.sin(a) * orbitR;
+
+    if (mine.cooldown > 0) {
+      const frac = 1 - mine.cooldown / w.respawn;
+      ctx.strokeStyle = hexToRgba(w.color, 0.28);
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(x, y, r, -Math.PI / 2, -Math.PI / 2 + TAU * frac);
+      ctx.stroke();
+      continue;
+    }
+
+    const pulse = 0.75 + 0.25 * Math.sin(game.corePulse * 4 + i);
+
+    ctx.globalCompositeOperation = 'lighter';
+    drawBlob(x, y, r * 3.4, w.color, 0.4 * pulse);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, TAU);
+    ctx.fillStyle = 'rgba(6,8,18,0.8)';
+    ctx.fill();
+    ctx.strokeStyle = w.color;
+    ctx.lineWidth = 2.2;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(x, y, r * 0.36, 0, TAU);
+    ctx.fillStyle = '#ffffff';
+    ctx.globalAlpha = pulse;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
 }
 
 /**
@@ -2186,6 +2504,31 @@ function traceShape(shape, r) {
     ctx.lineTo(0, r * 0.7);
     ctx.lineTo(-r, 0);
     ctx.lineTo(0, -r * 0.7);
+    return;
+  }
+  if (shape === 'square') {
+    const k = r * 0.78;
+    ctx.moveTo(k, k);
+    ctx.lineTo(-k, k);
+    ctx.lineTo(-k, -k);
+    ctx.lineTo(k, -k);
+    return;
+  }
+  if (shape === 'chevron') {
+    // Pointe fendue : la Sentinelle se distingue même immobile.
+    ctx.moveTo(r, 0);
+    ctx.lineTo(-r * 0.55, r * 0.85);
+    ctx.lineTo(-r * 0.15, 0);
+    ctx.lineTo(-r * 0.55, -r * 0.85);
+    return;
+  }
+  if (shape === 'pentagon') {
+    for (let i = 0; i < 5; i++) {
+      const a = (i / 5) * TAU;
+      const x = Math.cos(a) * r;
+      const y = Math.sin(a) * r;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
     return;
   }
   // hexagone
@@ -2528,6 +2871,11 @@ const WEAPON_GLYPHS = {
   lance: '<path d="M11 20V9"/><path d="M11 2 7.5 9h7z" fill="currentColor" stroke="none"/>',
   rear: '<path d="M11 2v8"/><path d="M11 20l3.5-7h-7z" fill="currentColor" stroke="none"/>',
   chain: '<path d="M12.5 2 6 11.5h4L8.5 20 16 9.5h-4.5z" fill="currentColor" stroke="none"/>',
+  mines: '<circle cx="11" cy="11" r="2.4" fill="currentColor" stroke="none"/>'
+       + '<circle cx="11" cy="11" r="8"/>'
+       + '<circle cx="11" cy="3" r="1.9" fill="currentColor" stroke="none"/>'
+       + '<circle cx="17.9" cy="15" r="1.9" fill="currentColor" stroke="none"/>'
+       + '<circle cx="4.1" cy="15" r="1.9" fill="currentColor" stroke="none"/>',
   orbit: '<circle cx="11" cy="11" r="3" fill="currentColor" stroke="none"/>'
        + '<ellipse cx="11" cy="11" rx="9" ry="4.2"/>'
        + '<circle cx="20" cy="11" r="1.7" fill="currentColor" stroke="none"/>'

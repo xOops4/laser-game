@@ -94,6 +94,14 @@ palier. Les noms restent accessibles aux lecteurs d'écran et au survol.
 | Orbiteurs | 2 100 | Trois satellites qui visent et tirent seuls, même doigt levé. |
 | Revers | 4 200 | Un rayon dans le dos. Couvre ce que tu ne regardes pas. |
 | Foudre | 7 000 | Un arc qui saute jusqu'à quatre ennemis, tout seul. |
+| Mines | 11 000 | Cinq mines en orbite lointaine, qui sautent au contact. |
+
+Les **Mines** occupent des emplacements fixes sur une orbite large (36 % du
+rayon d'apparition), qui tourne lentement à contresens des Orbiteurs. Une mine
+saute au premier contact, souffle tout dans 84 px — projectiles ennemis
+compris — puis son emplacement se recharge en 3,4 s. On voit donc en
+permanence quel secteur de l'orbite est encore protégé : une mine armée est un
+point vif, une mine en recharge un arc qui se referme.
 
 Un joueur correct franchit les trois premiers paliers vers 25 s, 40 s et 55 s,
 le Revers vers 90 s ; la Foudre est un objectif de fin de partie. Cumulées,
@@ -143,11 +151,21 @@ une amélioration déjà à son plafond.
 | Ennemi | Forme | Comportement |
 | --- | --- | --- |
 | Grunt | Triangle orange | Le tout-venant. Meurt en ~0,3 s de rayon. |
-| Darter | Losange jaune | Rapide et fragile, apparaît après 20 s. Punit les balayages lents. |
-| Tank | Hexagone violet | Lent mais très résistant, apparaît après 42 s. Frappe fort. |
+| Darter | Losange jaune | Rapide et fragile, à partir de 20 s. Punit les balayages lents. |
+| Tank | Hexagone violet | Lent mais très résistant, à partir de 42 s. Frappe fort. |
+| Rôdeur | Pentagone turquoise | À partir de 50 s. Ne fonce pas : il s'enroule vers le noyau, ce qui le fait glisser hors d'un rayon tenu droit. |
+| Essaim | Carré rouge | À partir de 68 s. Se scinde en trois éclats rapides à sa mort — l'abattre trop près du noyau se paie comptant. |
+| Sentinelle | Chevron bleu pâle | À partir de 88 s. S'arrête à distance et bombarde. Ses projectiles sont lents et **destructibles au rayon**. |
 
 La cadence d'apparition et la vitesse des ennemis montent en continu : pas de
 vagues ni de temps mort.
+
+Difficulté mesurée sur cinq parties d'un bot qui balaie sans jamais viser :
+quatre morts entre 47 s et 70 s, médiane 67 s, et une survie au-delà de 120 s.
+Cette dernière tient entièrement aux **améliorations définitives** — deux
+ramassées tôt suffisent à faire basculer une partie. C'est la plus grosse
+source de variance du jeu, et une exécution isolée ne dit donc rien de la
+difficulté réelle.
 
 ## Structure
 
