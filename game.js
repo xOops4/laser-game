@@ -338,9 +338,12 @@ function mode() {
 function spawnDistance(ux, uy) {
   if (!mode().halfArc) return view.spawnRadius;
 
+  // tx et ty sont des distances en pixels d'écran. Sous recul, un pixel
+  // d'écran vaut 1 / zoom unité du monde : sans cette division, les ennemis
+  // naissaient à l'intérieur du cadre et surgissaient en plein écran.
   const tx = ux > 0 ? (view.w - view.cx) / ux : (ux < 0 ? -view.cx / ux : Infinity);
   const ty = uy > 0 ? (view.h - view.cy) / uy : (uy < 0 ? -view.cy / uy : Infinity);
-  return Math.min(tx, ty) + 70;
+  return (Math.min(tx, ty) + 70) / view.zoom;
 }
 
 /**
@@ -1273,8 +1276,36 @@ function updateZoom(dt) {
     if (view.zoom !== target) { view.zoom = target; applyZoom(); }
     return;
   }
+
+  const before = view.zoom;
   view.zoom += (target - view.zoom) * Math.min(1, dt * CFG.zoom.ease);
   applyZoom();
+  holdOffscreen(before, view.zoom);
+}
+
+/** Le point est-il hors du cadre, à sa position d'écran, pour un zoom donné ? */
+function offscreenAt(x, y, zoom, margin) {
+  const sx = view.cx + (x - view.cx) * zoom;
+  const sy = view.cy + (y - view.cy) * zoom;
+  return sx < -margin || sx > view.w + margin || sy < -margin || sy > view.h + margin;
+}
+
+/**
+ * Reculer la caméra rapproche tout du centre à l'écran : sans correction, les
+ * ennemis qui attendaient juste au-delà du bord entraient dans le cadre d'un
+ * coup, comme s'ils y surgissaient. On repousse donc ceux qui sont hors champ
+ * pour qu'ils conservent exactement leur position à l'écran. Ceux déjà
+ * visibles, eux, rétrécissent normalement — c'est l'effet recherché.
+ */
+function holdOffscreen(oldZoom, newZoom) {
+  const k = oldZoom / newZoom;
+  if (k <= 1.0000001) return;
+
+  for (const e of game.enemies) {
+    if (!offscreenAt(e.x, e.y, oldZoom, e.radius * oldZoom)) continue;
+    e.x = view.cx + (e.x - view.cx) * k;
+    e.y = view.cy + (e.y - view.cy) * k;
+  }
 }
 
 /** Combien de fois plus d'ennemis qu'au niveau 1 : le coefficient affiché. */
@@ -3585,4 +3616,4 @@ showMenu();
 requestAnimationFrame(frame);
 
 /* Poignée de débogage : permet d'inspecter l'état depuis la console. */
-window.VIRGULE = { game, view, input, audio, perf, spawnDistance, densityInterval, zoomFor, MODES, CFG, ENEMY_TYPES, WEAPONS, BONUSES, COMBO_TIERS };
+window.VIRGULE = { game, view, input, audio, perf, spawnDistance, spawnEnemy, offscreenAt, densityInterval, zoomFor, MODES, CFG, ENEMY_TYPES, WEAPONS, BONUSES, COMBO_TIERS };

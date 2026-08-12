@@ -243,10 +243,21 @@ départ. Le recul est purement visuel — les distances de collision, elles, son
 inchangées — et il s'anime sur environ une seconde, annoncé par un bandeau
 pour qu'un écran qui s'éloigne ne passe pas pour un défaut d'affichage.
 
-Deux détails d'implémentation : les chiffres de dégâts compensent le recul
-pour garder une taille constante à l'écran, et le décor de fond raisonne en
-pixels d'écran plutôt qu'en unités du monde, puisqu'il est peint hors de la
-transformation.
+Trois détails d'implémentation, tous liés au même piège — mélanger pixels
+d'écran et unités du monde.
+
+Les chiffres de dégâts compensent le recul pour garder une taille constante à
+l'écran. Le décor de fond raisonne en pixels d'écran, puisqu'il est peint hors
+de la transformation. Et la distance d'apparition du mode Rempart, qui se
+calcule à partir des bords de l'écran, est divisée par le zoom pour redevenir
+une distance du monde : sans ça les ennemis naissaient à l'intérieur du cadre.
+
+Enfin, reculer la caméra rapproche tout du centre à l'écran. Les ennemis qui
+attendaient juste au-delà du bord entraient donc dans le cadre d'un coup
+pendant l'animation. Ceux qui sont hors champ sont désormais repoussés pour
+conserver exactement leur position à l'écran ; seuls les ennemis déjà visibles
+rétrécissent. Un ennemi n'entre ainsi jamais dans le cadre autrement que par
+son propre déplacement.
 
 Difficulté mesurée sur cinq parties d'un bot qui balaie sans jamais viser :
 quatre morts entre 47 s et 70 s, médiane 67 s, et une survie au-delà de 120 s.
