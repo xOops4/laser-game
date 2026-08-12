@@ -191,6 +191,22 @@ const DROP = {
    à réagir en chaîne, et l'écran part en morceaux. */
 const DETONATE = { fromTier: 6, damage: 26, radius: 58 };
 
+/*
+ * Chiffres de dégâts flottants.
+ *
+ * Un rayon frappe à chaque image : afficher les 1,8 points d'une image serait
+ * illisible. On cumule donc par ennemi et on relâche le total toutes les
+ * `tick` secondes, ou aussitôt s'il meurt. Le montant affiché est brut, jamais
+ * plafonné aux PV restants : un coup de 400 sur un ennemi qui en a 12 affiche
+ * bien 400.
+ */
+const DAMAGE_TEXT = {
+  tick: 0.2,           // regroupement des dégâts continus
+  max: 40,             // au-delà, l'écran devient illisible
+  life: 0.85,
+  rise: 46,            // px parcourus vers le haut sur toute la durée
+};
+
 /* Types d'ennemis. `unlock` = secondes avant qu'il puisse apparaître. */
 const ENEMY_TYPES = {
   grunt: {
@@ -731,6 +747,7 @@ const game = {
   enemies: [],
   pickups: [],
   particles: [],
+  damageText: [],       // chiffres de dégâts flottants
   flashes: [],          // halos ponctuels
   rings: [],            // ondes de choc en cours d'expansion
   spawnTimer: 0,
@@ -781,6 +798,7 @@ function resetGame() {
   game.enemies.length = 0;
   game.pickups.length = 0;
   game.particles.length = 0;
+  game.damageText.length = 0;
   game.flashes.length = 0;
   game.rings.length = 0;
   buildNebula();
@@ -1236,6 +1254,9 @@ function makeEnemy(def, opts) {
     trail: rand(0, 0.055),
     spiralDir: Math.random() < 0.5 ? -1 : 1,
     fireTimer: def.fireInterval ? rand(0.6, def.fireInterval) : 0,
+    dmgPending: 0,
+    dmgBurst: 0,
+    dmgTimer: DAMAGE_TEXT.tick,
     flash: 0,
   };
 }
@@ -1558,6 +1579,7 @@ function update(dt) {
   }
 
   updateChainArcs(dt);
+  updateDamageText(dt);
   updateDelayed(dt);
   game.screenFlash = Math.max(0, game.screenFlash - dt * 3.2);
 
@@ -1623,6 +1645,11 @@ function updateEnemies(dt) {
     }
 
     e.flash = Math.max(0, e.flash - dt * 12);
+
+    if (e.dmgPending > 0) {
+      e.dmgTimer -= dt;
+      if (e.dmgTimer <= 0) flushDamageText(e, false);
+    }
 
     // Traînée de réacteur. Coupée quand l'écran se remplit, pour tenir le budget.
     if (trails) {
@@ -1950,7 +1977,9 @@ function updateChainArcs(dt) {
  */
 function fireBeams(w, dt) {
   const reach = view.spawnRadius * w.range;
-  const damage = w.dps * dt * damageMultiplier();
+  const rate = w.dps * damageMultiplier();
+  const damage = rate * dt;
+  const burst = rate * DAMAGE_TEXT.tick;
 
   for (const offset of beamOffsets(w)) {
     const angle = beamAngleFor(offset);
@@ -1972,14 +2001,14 @@ function fireBeams(w, dt) {
       if (perp > e.radius + w.halfWidth + w.slack + along * w.slackPerPx) continue;
 
       if (w.pierce) {
-        hitEnemy(e, damage, ux, uy);
+        hitEnemy(e, damage, ux, uy, burst);
       } else if (along < nearestAlong) {
         nearestAlong = along;
         nearest = e;
       }
     }
 
-    if (nearest) hitEnemy(nearest, damage, ux, uy);
+    if (nearest) hitEnemy(nearest, damage, ux, uy, burst);
   }
 }
 
@@ -1990,7 +2019,9 @@ function fireBeams(w, dt) {
  */
 function fireOrbiters(w, dt) {
   const reach = view.spawnRadius * w.range;
-  const damage = w.dps * dt * damageMultiplier();
+  const rate = w.dps * damageMultiplier();
+  const damage = rate * dt;
+  const burst = rate * DAMAGE_TEXT.tick;
   const orbitR = view.coreRadius * w.orbit;
 
   const count = orbiterCount(w);
@@ -2012,7 +2043,7 @@ function fireOrbiters(w, dt) {
 
     const ux = (e.x - sx) / (bestDist || 1);
     const uy = (e.y - sy) / (bestDist || 1);
-    hitEnemy(e, damage, ux, uy);
+    hitEnemy(e, damage, ux, uy, burst);
   }
 }
 
@@ -2023,12 +2054,19 @@ function fireOrbiters(w, dt) {
  * retire des ennemis au milieu du tableau, et tout index capturé avant
  * devient faux — c'est ce qui faisait planter la boucle.
  */
-function hitEnemy(enemy, damage, ux, uy) {
+function hitEnemy(enemy, damage, ux, uy, burst) {
   if (enemy.hp <= 0) return;   // déjà abattu dans la même image
   enemy.hp -= damage;
   enemy.flash = 1;
+  // Cumul brut : ce qui dépasse les PV restants compte quand même.
+  enemy.dmgPending += damage;
+  // `burst` est la force du coup affichée : pour un rayon, l'équivalent d'un
+  // cycle complet. Sans lui, un ennemi pulvérisé en une image n'afficherait
+  // que les quelques points de cette image au lieu de la puissance réelle.
+  enemy.dmgBurst = Math.max(enemy.dmgBurst || 0, burst === undefined ? damage : burst);
 
   if (enemy.hp <= 0) {
+    flushDamageText(enemy, true);
     killEnemy(enemy);
     return;
   }
@@ -2192,6 +2230,76 @@ function updateBuffs(dt) {
   }
 }
 
+/* ------------------------------------------------------------------ *
+ *  Chiffres de dégâts
+ * ------------------------------------------------------------------ */
+
+/** Relâche le cumul d'un ennemi sous forme de chiffre flottant. */
+function flushDamageText(enemy, killing) {
+  // Sur le coup fatal on retient la force du coup plutôt que la fraction
+  // réellement consommée : c'est là que le surdégât doit se voir.
+  const value = Math.round(killing
+    ? Math.max(enemy.dmgPending, enemy.dmgBurst || 0)
+    : enemy.dmgPending);
+  enemy.dmgPending = 0;
+  enemy.dmgBurst = 0;
+  enemy.dmgTimer = DAMAGE_TEXT.tick;
+  if (value < 1) return;
+  if (game.damageText.length >= DAMAGE_TEXT.max) return;
+
+  game.damageText.push({
+    x: enemy.x + rand(-enemy.radius * 0.5, enemy.radius * 0.5),
+    y: enemy.y - enemy.radius * 0.6,
+    drift: rand(-14, 14),
+    value,
+    killing,
+    // Le coup fatal prend la couleur de la série en cours : on repère d'un
+    // coup d'œil ce qui a tué, au milieu des dégâts qui grattent.
+    color: killing ? game.tierTo : '#ffffff',
+    life: killing ? DAMAGE_TEXT.life * 1.25 : DAMAGE_TEXT.life,
+    maxLife: killing ? DAMAGE_TEXT.life * 1.25 : DAMAGE_TEXT.life,
+  });
+}
+
+function updateDamageText(dt) {
+  for (let i = game.damageText.length - 1; i >= 0; i--) {
+    if ((game.damageText[i].life -= dt) <= 0) game.damageText.splice(i, 1);
+  }
+}
+
+function drawDamageText() {
+  if (!game.damageText.length) return;
+
+  const s = view.scale;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineJoin = 'round';
+
+  for (const d of game.damageText) {
+    const t = 1 - d.life / d.maxLife;
+    // Montée qui décélère, puis effacement sur le dernier tiers.
+    const y = d.y - DAMAGE_TEXT.rise * (1 - (1 - t) * (1 - t));
+    const x = d.x + d.drift * t;
+    const alpha = t < 0.65 ? 1 : 1 - (t - 0.65) / 0.35;
+
+    // La taille suit l'ampleur du coup, pour que 400 ne se lise pas comme 4.
+    const size = Math.round((d.killing ? 14 : 11) * s + Math.min(11, d.value / 26) * s);
+    ctx.font = `800 ${size}px ui-sans-serif, system-ui, sans-serif`;
+    ctx.globalAlpha = alpha;
+
+    // Contour sombre : lisible sur les rayons comme sur le fond noir.
+    ctx.strokeStyle = 'rgba(3,5,12,0.85)';
+    ctx.lineWidth = Math.max(3, size * 0.28);
+    ctx.strokeText(d.value, x, y);
+    ctx.fillStyle = d.color;
+    ctx.fillText(d.value, x, y);
+  }
+
+  ctx.globalAlpha = 1;
+  ctx.textBaseline = 'top';
+  ctx.lineJoin = 'miter';
+}
+
 /** Débloque les armes dont le palier de score vient d'être franchi. */
 function checkUnlocks() {
   for (let i = 0; i < WEAPONS.length; i++) {
@@ -2262,6 +2370,8 @@ function render(dt) {
   drawPickups();
   drawShots();
   drawEnemies();
+
+  drawDamageText();
 
   if (game.hp > 0) {
     drawCore();

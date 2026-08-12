@@ -136,6 +136,27 @@ le Revers vers 90 s ; la Foudre est un objectif de fin de partie. Cumulées,
 les armes multiplient largement les dégâts du Rayon seul — c'est pourquoi les
 ennemis gagnent des points de vie avec le temps (+100 % en 260 s).
 
+## Chiffres de dégâts
+
+Chaque ennemi touché affiche le montant encaissé, en chiffres flottants dont
+la taille suit l'ampleur du coup. Le coup fatal prend la couleur du palier de
+série en cours, ce qui le distingue des dégâts qui grattent.
+
+Deux choix méritent d'être explicités.
+
+**Les dégâts continus sont regroupés.** Un rayon frappe à chaque image :
+afficher les 1,8 points d'une image serait illisible. Les dégâts sont donc
+cumulés par ennemi et relâchés toutes les 0,2 s — un Rayon nu affiche 23, le
+même Rayon avec Surcharge et trois Amplificateurs affiche 71.
+
+**Le montant n'est jamais plafonné aux points de vie restants.** Un coup de
+mine à 135 sur un ennemi qui n'en a plus que 5 affiche bien 135. Et lorsqu'un
+ennemi est pulvérisé en une seule image, c'est la force du coup qui s'affiche,
+pas la fraction réellement consommée : sinon un arsenal surpuissant produirait
+paradoxalement de tout petits nombres.
+
+Le nombre de chiffres simultanés est plafonné à 40.
+
 ## Détonations en chaîne
 
 À partir du palier **Furie** (×6), chaque mort souffle ses voisins dans un
